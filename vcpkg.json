@@ -1,0 +1,16 @@
+{
+  "name": "ember",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "sdl3",
+    "volk",
+    "vulkan-headers",
+    "vulkan-memory-allocator",
+    "doctest",
+    "tracy",
+    {
+      "name": "imgui",
+      "features": [ "sdl3-binding" ]
+    }
+  ]
+}
