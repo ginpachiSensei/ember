@@ -3,11 +3,14 @@
 
 #include "ember/core/Log.h"
 #include "ember/core/Profile.h"
+#include "ember/debugui/Theme.h"
 #include "ember/platform/Window.h"
 #include "ember/rhi/Device.h"
 
+#include <IconsFontAwesome6.h>
 #include <imgui.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <thread>
@@ -19,7 +22,11 @@ namespace {
 struct SandboxState {
     bool animateColor = true;
     bool showDemoWindow = false;
+    bool showStyleEditor = false;
     f32 clearColor[3] = {0.05f, 0.05f, 0.10f};
+
+    std::array<f32, 120> frameTimesMs{}; // ring buffer for the graph
+    usize frameTimeIndex = 0;
 };
 
 void drawDebugUi(SandboxState& state, const rhi::Device& device)
@@ -27,21 +34,52 @@ void drawDebugUi(SandboxState& state, const rhi::Device& device)
     EMBER_PROFILE_FUNCTION();
     const ImGuiIO& io = ImGui::GetIO();
 
-    ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Ember", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::Text("%.1f FPS (%.2f ms)", io.Framerate, 1000.0f / io.Framerate);
-    ImGui::Text("GPU: %s", device.gpuName());
-    ImGui::Text("Backbuffer: %u x %u", device.backbufferWidth(), device.backbufferHeight());
-    ImGui::Separator();
-    ImGui::Checkbox("Animate clear color", &state.animateColor);
+    state.frameTimesMs[state.frameTimeIndex] = io.DeltaTime * 1000.0f;
+    state.frameTimeIndex = (state.frameTimeIndex + 1) % state.frameTimesMs.size();
+
+    ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
+    ImGui::Begin(ICON_FA_FIRE "  Ember", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+
+    ImGui::SeparatorText(ICON_FA_GAUGE_HIGH "  Performance");
+    ImGui::Text("%.1f FPS", io.Framerate);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%.2f ms)", 1000.0f / io.Framerate);
+    ImGui::PlotLines("##frametimes", state.frameTimesMs.data(), static_cast<int>(state.frameTimesMs.size()),
+                     static_cast<int>(state.frameTimeIndex), "frame time (ms)", 0.0f, 33.3f, ImVec2(260, 60));
+
+    ImGui::SeparatorText(ICON_FA_MICROCHIP "  Device");
+    if (ImGui::BeginTable("##device", 2)) {
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("GPU");
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(device.gpuName());
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("Backbuffer");
+        ImGui::TableNextColumn();
+        ImGui::Text("%u x %u", device.backbufferWidth(), device.backbufferHeight());
+        ImGui::EndTable();
+    }
+
+    ImGui::SeparatorText(ICON_FA_PALETTE "  Clear color");
+    ImGui::Checkbox("Animate", &state.animateColor);
     ImGui::BeginDisabled(state.animateColor);
-    ImGui::ColorEdit3("Clear color", state.clearColor);
+    ImGui::ColorEdit3("##clearcolor", state.clearColor);
     ImGui::EndDisabled();
-    ImGui::Checkbox("Show ImGui demo window", &state.showDemoWindow);
+
+    ImGui::SeparatorText(ICON_FA_SLIDERS "  Tools");
+    ImGui::Checkbox(ICON_FA_LAYER_GROUP "  ImGui demo window", &state.showDemoWindow);
+    ImGui::Checkbox(ICON_FA_EYE "  Style editor", &state.showStyleEditor);
     ImGui::End();
 
     if (state.showDemoWindow) {
         ImGui::ShowDemoWindow(&state.showDemoWindow);
+    }
+    if (state.showStyleEditor) {
+        // Tweak every style value live; "Export" copies the result as C++ code.
+        ImGui::Begin(ICON_FA_EYE "  Style editor", &state.showStyleEditor);
+        ImGui::ShowStyleEditor();
+        ImGui::End();
     }
 }
 
@@ -72,7 +110,12 @@ int main()
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    ImGui::StyleColorsDark();
+    debugui::applyTheme({
+        .fontDirectory = EMBER_CONTENT_DIR "/fonts",
+        .fontSize = 16.0f,
+        .dpiScale = window->displayScale(),
+        .linearOutput = device->isBackbufferSrgb(),
+    });
     window->initImGui();
     device->initImGui();
 

@@ -50,6 +50,7 @@ public:
     const char* gpuName() const;
     u32 backbufferWidth() const;
     u32 backbufferHeight() const;
+    bool isBackbufferSrgb() const; // true: write linear colors, the hardware converts to sRGB
 
     struct Impl;
 

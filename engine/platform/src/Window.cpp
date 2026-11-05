@@ -110,6 +110,12 @@ u32 Window::height() const
     return static_cast<u32>(h);
 }
 
+f32 Window::displayScale() const
+{
+    const f32 scale = SDL_GetWindowDisplayScale(m_window);
+    return scale > 0.0f ? scale : 1.0f; // 0 means SDL couldn't tell
+}
+
 NativeWindowHandle Window::nativeHandle() const
 {
     NativeWindowHandle handle;

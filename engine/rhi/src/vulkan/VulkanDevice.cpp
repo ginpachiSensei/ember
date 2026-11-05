@@ -14,7 +14,6 @@
 #include <imgui_impl_vulkan.h>
 
 #include <algorithm>
-#include <cmath>
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -790,6 +789,12 @@ u32 Device::backbufferHeight() const
     return m_impl->swapchainExtent.height;
 }
 
+bool Device::isBackbufferSrgb() const
+{
+    const VkFormat format = m_impl->swapchainFormat;
+    return format == VK_FORMAT_B8G8R8A8_SRGB || format == VK_FORMAT_R8G8B8A8_SRGB;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Dear ImGui
 // ---------------------------------------------------------------------------------------------
@@ -802,11 +807,6 @@ void checkImGuiVkResult(VkResult result)
         EMBER_LOG_FATAL("ImGui Vulkan backend error: {}", vkResultName(result));
         std::abort();
     }
-}
-
-f32 srgbToLinear(f32 c)
-{
-    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
 
 } // namespace
@@ -836,15 +836,6 @@ void Device::initImGui()
     info.MinAllocationSize = 1024 * 1024;
     info.CheckVkResultFn = checkImGuiVkResult;
     EMBER_VERIFY(ImGui_ImplVulkan_Init(&info));
-
-    // ImGui's colors are authored in sRGB, but our swapchain is sRGB, which expects linear values.
-    // Convert the style once so the UI doesn't look washed out.
-    for (ImVec4& color : ImGui::GetStyle().Colors) {
-        color.x = srgbToLinear(color.x);
-        color.y = srgbToLinear(color.y);
-        color.z = srgbToLinear(color.z);
-    }
-
     d.imguiEnabled = true;
 }
 

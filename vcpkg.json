@@ -10,7 +10,7 @@
     "tracy",
     {
       "name": "imgui",
-      "features": [ "sdl3-binding" ]
+      "features": [ "sdl3-binding", "freetype" ]
     }
   ]
 }

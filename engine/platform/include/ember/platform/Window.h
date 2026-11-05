@@ -48,6 +48,9 @@ public:
     u32 width() const;
     u32 height() const;
 
+    // Content scale of the monitor the window is on (1.0 = 100%, 1.5 = 150%).
+    f32 displayScale() const;
+
     NativeWindowHandle nativeHandle() const;
 
     // Dear ImGui platform side (input, window size). Needs an ImGui context to exist.

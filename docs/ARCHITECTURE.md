@@ -32,6 +32,7 @@ runtime      engine loop, world, system scheduling          (planned)
 render       render graph + features (shadows, GI, post)    (planned)
 physics / audio / anim                                      (planned)
 scene        ECS, transforms               asset  runtime loading, streaming   (planned)
+debugui      Dear ImGui theme (Inter + Font Awesome icons, ember-orange palette)
 rhi          Vulkan device, swapchain, command lists, resources
 platform     window, input, files, threads, time
 core         types, log, assert, containers, handles, jobs, math, reflection
