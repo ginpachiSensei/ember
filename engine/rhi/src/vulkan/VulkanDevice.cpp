@@ -932,6 +932,22 @@ const char* Device::gpuName() const
     return m_impl->gpuProperties.deviceName;
 }
 
+Device::MemoryUsage Device::gpuMemory() const
+{
+    const VkPhysicalDeviceMemoryProperties* props = nullptr;
+    vmaGetMemoryProperties(m_impl->allocator, &props);
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(m_impl->allocator, budgets);
+    MemoryUsage usage;
+    for (u32 heap = 0; heap < props->memoryHeapCount; ++heap) {
+        if (props->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            usage.usedBytes += budgets[heap].usage;
+            usage.budgetBytes += budgets[heap].budget;
+        }
+    }
+    return usage;
+}
+
 u32 Device::backbufferWidth() const
 {
     return m_impl->swapchainExtent.width;

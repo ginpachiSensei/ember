@@ -31,13 +31,13 @@ apps/        sandbox, editor, game
 runtime      engine loop, world, system scheduling          (planned)
 render       forward PBR renderer: shadows, IBL, sky, tonemap; shader hot reload (render graph: phase 3)
 physics / audio / anim                                      (planned)
-scene        ECS, transforms (planned)     asset  glTF/HDR loading, procedural shapes (cooker + streaming: phase 2)
-debugui      Dear ImGui theme (Inter + Font Awesome icons, ember-orange palette)
+scene        EnTT world: transforms, hierarchy, scene files     asset  cooked formats, AssetManager (async, ref-counted, hot reload), glTF/HDR importers
+debugui      Dear ImGui theme + reflection-driven inspector
 rhi          Vulkan device, swapchain, bindless table, command lists, resources
 platform     window, input, files, threads, time
-core         types, log, assert, containers, handles, jobs, math, reflection
+core         types, log, assert, handles, memory (allocators + tracking), jobs, math, Guid, reflection, JSON
 
-tools/       cooker, shader compiler: separate executables, link core only (planned)
+tools/       ember_cooker (links core + asset only), fetch-sample-content.ps1
 ```
 
 Rules:
@@ -99,9 +99,31 @@ Frame N+1:                 [game update N+1][extract N+1] ...
 
 Fixed timestep for simulation, variable for rendering. Sync points: *extract* and GPU fences.
 
-## Asset pipeline (target)
+## Asset pipeline
 
 ```
-content/ (gltf, png + .meta GUID) -> tools/cooker -> cooked binaries + manifest -> runtime asset system
-                                         (meshlets, LODs, BC7, derived-data cache)   (async IO, handles, refcount)
+content/ (glb/gltf/hdr + .meta Guid) -> ember_cooker -> build/cooked/<guid>.emodel|.eenv + manifest.json -> AssetManager
+                                          (mip chains now; meshlets,     (skips sources whose content     (loads on worker threads,
+                                           LODs, BC7 later)               hash didn't change)              ref counts, hot reload)
 ```
+
+- Everything references assets by **Guid**, never by path. The Guid lives in the `.meta` file next to the source.
+- The `ember_cook` build target runs the cooker on every build; it's incremental, so it's quick.
+- Hot reload: the AssetManager watches the sources of loaded assets, runs the cooker on a changed one
+  and reloads it. The game sees a new `version()` and re-uploads.
+
+## Scene and game state
+
+- `scene::Scene` wraps an EnTT registry. Every entity has an `IdComponent` (Guid), a name, a local
+  `Transform`, a computed `WorldTransform` and `Hierarchy` links (parent / first child / siblings).
+- Components are plain reflected structs (`EMBER_REFLECT_*`), so scene files, the inspector and
+  anything else generic come for free. Register game components with `Scene::registerComponent<T>()`.
+- Each frame the game runs systems (plain functions over component views), then *extracts* a flat
+  `render::RenderScene`. The renderer never sees entities.
+
+## Memory
+
+- `memory::allocate` counts bytes per `memory::Tag`; `TrackedAllocator` does the same for std containers
+  (asset data, job queues and the render scene use it). The Engine panel shows live/peak per tag plus GPU memory.
+- `LinearAllocator` / `FrameAllocator` for scratch data (the renderer's draw list lives in frame memory),
+  `PoolAllocator<T>` for many same-sized objects.

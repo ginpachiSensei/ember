@@ -1,6 +1,7 @@
 find_package(imgui CONFIG REQUIRED)
 
 add_library(ember_debugui STATIC
+    src/Inspector.cpp
     src/Theme.cpp
 )
 add_library(ember::debugui ALIAS ember_debugui)

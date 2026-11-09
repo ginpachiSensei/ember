@@ -106,7 +106,7 @@ Material convertMaterial(const cgltf_data& data, const cgltf_material& m)
 }
 
 // Smooth vertex normals from triangle areas, for meshes that don't ship any.
-void generateNormals(std::vector<Vertex>& vertices, u32 firstVertex, const u32* indices, usize indexCount)
+void generateNormals(AssetVector<Vertex>& vertices, u32 firstVertex, const u32* indices, usize indexCount)
 {
     for (usize i = 0; i + 2 < indexCount; i += 3) {
         Vertex& a = vertices[firstVertex + indices[i]];

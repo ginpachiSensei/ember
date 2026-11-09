@@ -11,6 +11,8 @@
     "glm",
     "cgltf",
     "stb",
+    "entt",
+    "nlohmann-json",
     "doctest",
     "tracy",
     {

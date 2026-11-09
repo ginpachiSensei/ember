@@ -20,11 +20,11 @@ headline features (Nanite, Lumen, Virtual Shadow Maps, TSR).
 - [x] Directional shadow map (PCF), tonemapping (AgX, ACES, PBR Neutral, Reinhard)
 
 ## Phase 2: Engine core
-- [ ] Allocators (frame/linear, pool, general) + memory tracking
-- [ ] Job system (work-stealing, counters)
-- [ ] ECS (EnTT), transforms and hierarchy
-- [ ] Asset GUIDs, cooker v1, async loading, hot reload
-- [ ] Reflection + serialization
+- [x] Allocators (linear, frame, pool, tracked heap) + per-tag memory stats
+- [x] Job system (per-thread queues with stealing, counters, parallelFor)
+- [x] ECS (EnTT), transforms and hierarchy (parallel world-transform update)
+- [x] Asset GUIDs (.meta files), cooker v1 (incremental, parallel), async loading, hot reload
+- [x] Reflection + JSON serialization (scene files, meta/manifest, auto-generated inspector)
 
 ## Phase 3: Modern RHI
 - [x] Bindless descriptors (done early in phase 1: it's the RHI's only binding model)

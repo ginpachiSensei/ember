@@ -1,11 +1,16 @@
 add_library(ember_core STATIC
+    src/Guid.cpp
+    src/Jobs.cpp
     src/Log.cpp
+    src/Memory.cpp
+    src/Serialize.cpp
 )
 add_library(ember::core ALIAS ember_core)
 
 target_include_directories(ember_core PUBLIC include)
 find_package(glm CONFIG REQUIRED)
-target_link_libraries(ember_core PUBLIC glm::glm)
+find_package(nlohmann_json CONFIG REQUIRED)
+target_link_libraries(ember_core PUBLIC glm::glm nlohmann_json::nlohmann_json)
 ember_configure_target(ember_core "engine")
 
 if(EMBER_ENABLE_PROFILING)
@@ -15,11 +20,12 @@ if(EMBER_ENABLE_PROFILING)
 endif()
 
 if(EMBER_BUILD_TESTS)
-    find_package(doctest CONFIG REQUIRED)
-
     add_executable(ember_core_tests
         tests/TestMain.cpp
         tests/SlotMapTests.cpp
+        tests/MemoryTests.cpp
+        tests/JobsTests.cpp
+        tests/ReflectTests.cpp
     )
     target_link_libraries(ember_core_tests PRIVATE ember::core doctest::doctest)
     ember_configure_target(ember_core_tests "tests")

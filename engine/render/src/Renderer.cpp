@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <span>
 
 namespace ember::render {
 
@@ -70,6 +71,13 @@ struct GpuModel {
     std::vector<u32> materialFlags;
     vec3 boundsMin{0.0f};
     vec3 boundsMax{0.0f};
+};
+
+// One mesh primitive to draw this frame. The list is built once and used by every pass.
+struct DrawItem {
+    const GpuModel* model;
+    const GpuPrimitive* primitive;
+    mat4 world;
 };
 
 struct Pipelines {
@@ -159,8 +167,9 @@ struct Renderer::Impl {
     TextureHandle createSolidTexture(u32 rgba, const char* name);
     void writeCapture();
 
-    template <typename Fn>
-    void forEachDraw(const RenderScene& scene, Fn&& fn);
+    // Per-frame scratch memory: the draw list lives here and is thrown away next frame.
+    FrameAllocator frameMemory{2 * 1024 * 1024};
+    std::span<DrawItem> buildDrawList(const RenderScene& scene);
 };
 
 TextureHandle Renderer::Impl::createSolidTexture(u32 rgba, const char* name)
@@ -460,9 +469,19 @@ void Renderer::Impl::bakeEnvironment(const vec3& sunDirection)
     EMBER_LOG_INFO("Baked image-based lighting in {:.1f} ms", ms);
 }
 
-template <typename Fn>
-void Renderer::Impl::forEachDraw(const RenderScene& scene, Fn&& fn)
+std::span<DrawItem> Renderer::Impl::buildDrawList(const RenderScene& scene)
 {
+    EMBER_PROFILE_FUNCTION();
+    usize count = 0;
+    for (const RenderInstance& instance : scene.instances) {
+        if (const GpuModel* model = models.get(instance.model)) {
+            for (const asset::Instance& node : model->instances) {
+                count += model->meshes[node.mesh].primitiveCount;
+            }
+        }
+    }
+    DrawItem* draws = static_cast<DrawItem*>(frameMemory.allocate(count * sizeof(DrawItem), alignof(DrawItem)));
+    usize i = 0;
     for (const RenderInstance& instance : scene.instances) {
         const GpuModel* model = models.get(instance.model);
         if (!model) {
@@ -472,10 +491,11 @@ void Renderer::Impl::forEachDraw(const RenderScene& scene, Fn&& fn)
             const mat4 world = instance.transform * node.transform;
             const asset::Mesh& mesh = model->meshes[node.mesh];
             for (u32 p = mesh.firstPrimitive; p < mesh.firstPrimitive + mesh.primitiveCount; ++p) {
-                fn(*model, model->primitives[p], world);
+                draws[i++] = {model, &model->primitives[p], world};
             }
         }
     }
+    return {draws, count};
 }
 
 void Renderer::Impl::writeCapture()
@@ -564,15 +584,28 @@ ModelHandle Renderer::uploadModel(const asset::Model& model)
             gpuModel.textures.push_back({}); // failed to decode; materials fall back to defaults
             continue;
         }
+        const bool cookedMips = image.mipLevels > 1;
         const TextureHandle texture = device.createTexture(
             {.width = image.width,
              .height = image.height,
-             .mipLevels = mipCount(image.width, image.height),
+             .mipLevels = cookedMips ? image.mipLevels : mipCount(image.width, image.height),
              .format = image.srgb ? Format::RGBA8Srgb : Format::RGBA8Unorm,
              .usage = TextureUsage::Sampled | TextureUsage::TransferSrc | TextureUsage::TransferDst,
              .debugName = image.name.c_str()});
-        device.uploadTexture(texture, image.pixels.data(), image.pixels.size());
-        device.generateMips(texture);
+        if (cookedMips) {
+            // The cooker already built the mip chain (with sRGB-correct filtering): upload it as-is.
+            usize offset = 0;
+            for (u32 mip = 0; mip < image.mipLevels; ++mip) {
+                const usize size = static_cast<usize>(std::max(1u, image.width >> mip)) *
+                                   std::max(1u, image.height >> mip) * 4;
+                EMBER_VERIFY(offset + size <= image.pixels.size());
+                device.uploadTexture(texture, image.pixels.data() + offset, size, mip);
+                offset += size;
+            }
+        } else {
+            device.uploadTexture(texture, image.pixels.data(), image.pixels.size());
+            device.generateMips(texture);
+        }
         gpuModel.textures.push_back(texture);
     }
 
@@ -676,6 +709,7 @@ void Renderer::render(CommandList& cmd, const RenderScene& scene)
     Impl& r = *m_impl;
     Device& device = r.device;
     r.stats = {};
+    r.frameMemory.beginFrame();
 
     if (r.capturePending) {
         // The copy recorded kFramesInFlight frames ago is complete once we're recording again; to keep
@@ -779,6 +813,10 @@ void Renderer::render(CommandList& cmd, const RenderScene& scene)
         return push;
     };
 
+    const std::span<DrawItem> draws = r.buildDrawList(scene);
+    r.stats.frameMemoryUsed = r.frameMemory.used();
+    r.stats.frameMemoryCapacity = r.frameMemory.capacity();
+
     // --- Shadow pass ---------------------------------------------------------------------------
     {
         ScopedLabel label(cmd, "Shadow map");
@@ -786,7 +824,9 @@ void Renderer::render(CommandList& cmd, const RenderScene& scene)
         rendering.depth = {r.shadowMap, LoadOp::Clear, 1.0f};
         cmd.beginRendering(rendering);
         PipelineHandle bound{};
-        r.forEachDraw(scene, [&](const GpuModel& model, const GpuPrimitive& prim, const mat4& world) {
+        for (const DrawItem& draw : draws) {
+            const GpuModel& model = *draw.model;
+            const GpuPrimitive& prim = *draw.primitive;
             const bool masked = (model.materialFlags[prim.material] & gpu::kMaterialAlphaMask) != 0;
             const PipelineHandle pipeline = masked ? r.pipelines.shadowMasked : r.pipelines.shadowOpaque;
             if (pipeline != bound) {
@@ -794,10 +834,10 @@ void Renderer::render(CommandList& cmd, const RenderScene& scene)
                 bound = pipeline;
             }
             cmd.bindIndexBuffer(model.indices);
-            cmd.pushConstants(makePush(model, prim, world));
+            cmd.pushConstants(makePush(model, prim, draw.world));
             cmd.drawIndexed(prim.indexCount, 1, prim.firstIndex, static_cast<i32>(prim.firstVertex));
             ++r.stats.shadowDrawCalls;
-        });
+        }
         cmd.endRendering();
         cmd.barrier(r.shadowMap, ResourceState::ShaderRead);
     }
@@ -812,7 +852,9 @@ void Renderer::render(CommandList& cmd, const RenderScene& scene)
         cmd.beginRendering(rendering);
 
         PipelineHandle bound{};
-        r.forEachDraw(scene, [&](const GpuModel& model, const GpuPrimitive& prim, const mat4& world) {
+        for (const DrawItem& draw : draws) {
+            const GpuModel& model = *draw.model;
+            const GpuPrimitive& prim = *draw.primitive;
             const bool doubleSided = (model.materialFlags[prim.material] & gpu::kMaterialDoubleSided) != 0;
             const PipelineHandle pipeline = doubleSided ? r.pipelines.meshDoubleSided : r.pipelines.meshOpaque;
             if (pipeline != bound) {
@@ -820,11 +862,11 @@ void Renderer::render(CommandList& cmd, const RenderScene& scene)
                 bound = pipeline;
             }
             cmd.bindIndexBuffer(model.indices);
-            cmd.pushConstants(makePush(model, prim, world));
+            cmd.pushConstants(makePush(model, prim, draw.world));
             cmd.drawIndexed(prim.indexCount, 1, prim.firstIndex, static_cast<i32>(prim.firstVertex));
             ++r.stats.drawCalls;
             r.stats.triangles += prim.indexCount / 3;
-        });
+        }
 
         cmd.bindPipeline(r.pipelines.sky);
         cmd.pushConstants(gpu::SkyPush{frameAddress});
@@ -852,7 +894,12 @@ void Renderer::render(CommandList& cmd, const RenderScene& scene)
         cmd.endRendering();
     }
 
-    // --- Screenshot ----------------------------------------------------------------------------
+}
+
+void Renderer::recordCapture(CommandList& cmd)
+{
+    Impl& r = *m_impl;
+    Device& device = r.device;
     if (!r.capturePath.empty() && !r.capturePending) {
         const u32 width = device.backbufferWidth();
         const u32 height = device.backbufferHeight();

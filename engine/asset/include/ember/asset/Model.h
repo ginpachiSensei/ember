@@ -4,6 +4,7 @@
 // cooker will produce this layout offline and the runtime will just read it.
 
 #include "ember/core/Math.h"
+#include "ember/core/Memory.h"
 #include "ember/core/Types.h"
 
 #include <filesystem>
@@ -12,6 +13,10 @@
 #include <vector>
 
 namespace ember::asset {
+
+// Asset data is counted under memory::Tag::Asset (see the Memory panel).
+template <typename T>
+using AssetVector = std::vector<T, memory::TrackedAllocator<T, memory::Tag::Asset>>;
 
 struct Vertex {
     vec3 position;
@@ -23,7 +28,8 @@ static_assert(sizeof(Vertex) == 32);
 struct Image {
     u32 width = 0;
     u32 height = 0;
-    std::vector<u8> pixels; // RGBA8
+    u32 mipLevels = 1;      // cooked images carry their whole mip chain
+    AssetVector<u8> pixels; // RGBA8, mip 0 first, then each smaller mip right after
     bool srgb = false;      // color data (base color, emissive) vs. linear data (normals, roughness)
     std::string name;
 };
@@ -73,8 +79,8 @@ struct Instance {
 };
 
 struct Model {
-    std::vector<Vertex> vertices;
-    std::vector<u32> indices;
+    AssetVector<Vertex> vertices;
+    AssetVector<u32> indices;
     std::vector<Primitive> primitives;
     std::vector<Mesh> meshes;
     std::vector<Instance> instances;
@@ -93,7 +99,7 @@ std::optional<Model> loadGltf(const std::filesystem::path& path);
 struct HdrImage {
     u32 width = 0;
     u32 height = 0;
-    std::vector<f32> pixels; // RGBA32F, linear
+    AssetVector<f32> pixels; // RGBA32F, linear
 };
 
 // Loads a Radiance .hdr file (e.g. an equirectangular environment from polyhaven.com).

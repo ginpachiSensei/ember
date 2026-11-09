@@ -86,6 +86,12 @@ public:
 
     const char* gpuName() const;
 
+    struct MemoryUsage {
+        u64 usedBytes = 0;   // allocated by this process in GPU-local memory
+        u64 budgetBytes = 0; // what the OS says this process can use before things slow down
+    };
+    MemoryUsage gpuMemory() const;
+
     struct Impl;
 
 private:

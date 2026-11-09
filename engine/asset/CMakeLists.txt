@@ -2,6 +2,9 @@ find_package(Stb REQUIRED)
 find_path(CGLTF_INCLUDE_DIRS "cgltf.h" REQUIRED)
 
 add_library(ember_asset STATIC
+    src/AssetDatabase.cpp
+    src/AssetManager.cpp
+    src/Cooked.cpp
     src/GltfLoader.cpp
     src/Procedural.cpp
     src/StbImpl.cpp

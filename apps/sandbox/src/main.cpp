@@ -1,52 +1,37 @@
 // Sandbox: the test bed where new engine features are tried out.
-// Phase 1: PBR renderer with IBL, sun shadows, tonemapping, glTF models and a fly camera.
+// Phase 2: an ECS scene (EnTT) with a hierarchy, cooked assets loaded on worker threads, a
+// reflection-driven inspector and scene files, on top of the phase 1 PBR renderer.
 //
 // Controls: hold right mouse + WASD/QE to fly (Shift = fast, scroll = speed), F12 = screenshot, Esc = quit.
 // Command line:
-//   --model <file.glb>   load a glTF model (default: content/models/DamagedHelmet/DamagedHelmet.glb)
-//   --hdr <file.hdr>     use an HDR environment instead of the procedural sky
-//   --capture <file.png> render a few frames, save a screenshot and exit
+//   --scene <file.json>  scene file to load/save (default: content/scenes/sandbox.scene.json)
+//   --hdr                start with the HDR sky (content/hdri/sky.hdr) instead of the procedural one
+//   --capture <file.png> render until assets are loaded, save a screenshot and exit
 //   --frames <n>         frames to render before --capture (default 5)
+//   --capture-ui         include the editor UI in the --capture screenshot
 //   --no-validation      run Debug builds without the Vulkan validation layer
 //   --camera x,y,z,yaw,pitch   start camera (degrees)       --sun azimuth,elevation (degrees)
 //   --view <n>           debug view (0 lit, 1 base color, 2 normals, 3 roughness, 4 metallic, 5 AO, 6 shadow)
 
-#include "ember/asset/Model.h"
+#include "Sandbox.h"
+
 #include "ember/core/Log.h"
 #include "ember/core/Profile.h"
 #include "ember/debugui/Theme.h"
-#include "ember/platform/Window.h"
-#include "ember/render/Renderer.h"
-#include "ember/rhi/Device.h"
 
-#include <IconsFontAwesome6.h>
 #include <imgui.h>
 
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <ctime>
-#include <filesystem>
-#include <optional>
 #include <string>
 #include <thread>
 
-using namespace ember;
 namespace fs = std::filesystem;
 
-namespace {
+namespace sandbox {
 
-struct Options {
-    fs::path model = fs::path(EMBER_CONTENT_DIR) / "models/DamagedHelmet/DamagedHelmet.glb";
-    fs::path hdr = fs::path(EMBER_CONTENT_DIR) / "hdri/sky.hdr";
-    fs::path capture;
-    u32 captureFrames = 5;
-    bool validation = true;
-    bool useHdr = false;
-    std::optional<std::array<f32, 5>> camera;
-    std::optional<std::array<f32, 2>> sun;
-    u32 debugView = 0;
-};
+namespace {
 
 template <usize N>
 std::array<f32, N> parseFloats(const std::string& text)
@@ -64,16 +49,18 @@ std::array<f32, N> parseFloats(const std::string& text)
 Options parseOptions(int argc, char** argv)
 {
     Options options;
+    options.scenePath = fs::path(EMBER_CONTENT_DIR) / "scenes/sandbox.scene.json";
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const bool hasValue = i + 1 < argc;
-        if (arg == "--model" && hasValue) {
-            options.model = argv[++i];
-        } else if (arg == "--hdr" && hasValue) {
-            options.hdr = argv[++i];
+        if (arg == "--scene" && hasValue) {
+            options.scenePath = argv[++i];
+        } else if (arg == "--hdr") {
             options.useHdr = true;
         } else if (arg == "--capture" && hasValue) {
             options.capture = argv[++i];
+        } else if (arg == "--capture-ui") {
+            options.captureUi = true;
         } else if (arg == "--frames" && hasValue) {
             options.captureFrames = static_cast<u32>(std::stoul(argv[++i]));
         } else if (arg == "--camera" && hasValue) {
@@ -92,30 +79,27 @@ Options parseOptions(int argc, char** argv)
 }
 
 // Spheres in a grid (metallic rows x roughness columns), a ground plane and a couple of cubes.
-// The classic sanity check for a PBR implementation.
-asset::Model makeTestScene()
+asset::Model makeTestShapes()
 {
     asset::Model model;
-    model.name = "Test scene";
+    model.name = "Test shapes";
 
     const u32 ground = asset::addMaterial(model, {.baseColorFactor = vec4(0.45f, 0.45f, 0.45f, 1.0f),
                                                   .metallicFactor = 0.0f,
                                                   .roughnessFactor = 0.8f,
                                                   .name = "Ground"});
-    const u32 groundMesh = asset::addPlaneMesh(model, ground, 40.0f);
-    model.instances.push_back({mat4(1.0f), groundMesh});
+    model.instances.push_back({mat4(1.0f), asset::addPlaneMesh(model, ground, 40.0f)});
 
     constexpr int kSteps = 6;
     for (int row = 0; row < 2; ++row) {
         for (int col = 0; col < kSteps; ++col) {
             const f32 roughness = static_cast<f32>(col) / static_cast<f32>(kSteps - 1);
-            const vec4 color = row == 0 ? vec4(0.9f, 0.1f, 0.1f, 1.0f) : vec4(1.0f, 0.78f, 0.34f, 1.0f); // red plastic, gold
+            const vec4 color = row == 0 ? vec4(0.9f, 0.1f, 0.1f, 1.0f) : vec4(1.0f, 0.78f, 0.34f, 1.0f); // plastic, gold
             const u32 material = asset::addMaterial(model, {.baseColorFactor = color,
                                                             .metallicFactor = row == 0 ? 0.0f : 1.0f,
                                                             .roughnessFactor = roughness});
             const u32 mesh = asset::addSphereMesh(model, material, 0.4f);
-            const vec3 position(-3.0f + static_cast<f32>(col) * 1.0f + 0.5f, 0.45f + static_cast<f32>(row) * 1.0f,
-                                -2.5f);
+            const vec3 position(-2.5f + static_cast<f32>(col), 0.45f + static_cast<f32>(row), -2.5f);
             model.instances.push_back({glm::translate(mat4(1.0f), position), mesh});
         }
     }
@@ -125,193 +109,210 @@ asset::Model makeTestScene()
                                                  .roughnessFactor = 0.5f});
     const u32 cube = asset::addCubeMesh(model, white, 0.5f);
     model.instances.push_back({glm::translate(mat4(1.0f), vec3(3.0f, 0.5f, 0.5f)), cube});
-    model.instances.push_back(
-        {glm::rotate(glm::translate(mat4(1.0f), vec3(-3.0f, 0.75f, 0.8f)), 0.6f, vec3(0, 1, 0)) *
-             glm::scale(mat4(1.0f), vec3(0.6f, 1.5f, 0.6f)),
-         cube});
+    model.instances.push_back({glm::rotate(glm::translate(mat4(1.0f), vec3(-3.0f, 0.75f, 0.8f)), 0.6f, vec3(0, 1, 0)) *
+                                   glm::scale(mat4(1.0f), vec3(0.6f, 1.5f, 0.6f)),
+                               cube});
     return model;
-}
-
-struct FlyCamera {
-    f32 speed = 3.0f; // meters per second
-
-    void update(render::Camera& camera, platform::Window& window, f32 dt)
-    {
-        const bool looking = window.isMouseDown(platform::MouseButton::Right);
-        window.setRelativeMouseMode(looking);
-        if (looking) {
-            constexpr f32 sensitivity = 0.0025f;
-            camera.yaw -= window.mouseDeltaX() * sensitivity;
-            camera.pitch -= window.mouseDeltaY() * sensitivity;
-            camera.pitch = glm::clamp(camera.pitch, -1.55f, 1.55f);
-            speed = glm::clamp(speed * std::pow(1.2f, window.scrollDelta()), 0.1f, 200.0f);
-        }
-
-        vec3 move(0.0f);
-        using platform::Key;
-        move += camera.forward() * (static_cast<f32>(window.isKeyDown(Key::W)) - static_cast<f32>(window.isKeyDown(Key::S)));
-        move += camera.right() * (static_cast<f32>(window.isKeyDown(Key::D)) - static_cast<f32>(window.isKeyDown(Key::A)));
-        move.y += static_cast<f32>(window.isKeyDown(Key::E)) - static_cast<f32>(window.isKeyDown(Key::Q));
-        if (glm::length(move) > 0.0f) {
-            const f32 boost = window.isKeyDown(Key::LeftShift) ? 4.0f : 1.0f;
-            camera.position += glm::normalize(move) * speed * boost * dt;
-        }
-    }
-};
-
-struct SandboxState {
-    render::RenderScene scene;
-    FlyCamera fly;
-    render::ModelHandle helmet;
-    bool spinHelmet = true;
-    f32 helmetAngle = 0.0f;
-    f32 sunAzimuth = glm::radians(35.0f);
-    f32 sunElevation = glm::radians(40.0f);
-    bool useHdr = false;
-    bool hasHdr = false;
-    bool environmentChanged = false;
-    bool requestScreenshot = false;
-
-    std::array<f32, 120> frameTimesMs{}; // ring buffer for the graph
-    usize frameTimeIndex = 0;
-};
-
-void drawDebugUi(SandboxState& state, const rhi::Device& device, render::Renderer& renderer)
-{
-    EMBER_PROFILE_FUNCTION();
-    const ImGuiIO& io = ImGui::GetIO();
-    render::RenderSettings& settings = renderer.settings();
-
-    state.frameTimesMs[state.frameTimeIndex] = io.DeltaTime * 1000.0f;
-    state.frameTimeIndex = (state.frameTimeIndex + 1) % state.frameTimesMs.size();
-
-    ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
-    ImGui::Begin(ICON_FA_FIRE "  Ember");
-
-    if (ImGui::CollapsingHeader(ICON_FA_GAUGE_HIGH "  Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Text("%.1f FPS", io.Framerate);
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%.2f ms)", 1000.0f / io.Framerate);
-        ImGui::PlotLines("##frametimes", state.frameTimesMs.data(), static_cast<int>(state.frameTimesMs.size()),
-                         static_cast<int>(state.frameTimeIndex), "frame time (ms)", 0.0f, 33.3f, ImVec2(-1, 60));
-        const render::RenderStats& stats = renderer.stats();
-        ImGui::TextDisabled("%s", device.gpuName());
-        ImGui::TextDisabled("%u x %u  |  %u draws  |  %u shadow draws  |  %.1fk tris", device.backbufferWidth(),
-                            device.backbufferHeight(), stats.drawCalls, stats.shadowDrawCalls,
-                            static_cast<f32>(stats.triangles) / 1000.0f);
-    }
-
-    if (ImGui::CollapsingHeader(ICON_FA_CAMERA "  Image", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderFloat("Exposure (EV)", &settings.exposureEv, -6.0f, 6.0f, "%.1f");
-        const char* tonemappers[] = {"None (clip)", "Reinhard", "ACES (fitted)", "AgX", "Khronos PBR Neutral"};
-        int tonemapper = static_cast<int>(settings.tonemapper);
-        if (ImGui::Combo("Tonemapper", &tonemapper, tonemappers, IM_ARRAYSIZE(tonemappers))) {
-            settings.tonemapper = static_cast<render::Tonemapper>(tonemapper);
-        }
-        const char* views[] = {"Lit", "Base color", "Normals", "Roughness", "Metallic", "Occlusion", "Shadow"};
-        int view = static_cast<int>(settings.debugView);
-        if (ImGui::Combo("Debug view", &view, views, IM_ARRAYSIZE(views))) {
-            settings.debugView = static_cast<render::DebugView>(view);
-        }
-        if (ImGui::Button(ICON_FA_IMAGE "  Screenshot (F12)")) {
-            state.requestScreenshot = true;
-        }
-    }
-
-    if (ImGui::CollapsingHeader(ICON_FA_SUN "  Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderAngle("Sun azimuth", &state.sunAzimuth, -180.0f, 180.0f);
-        ImGui::SliderAngle("Sun elevation", &state.sunElevation, -5.0f, 90.0f);
-        ImGui::SliderFloat("Sun intensity", &state.scene.sun.intensity, 0.0f, 20.0f);
-        ImGui::ColorEdit3("Sun color", &state.scene.sun.color.x);
-        ImGui::SliderFloat("IBL intensity", &settings.iblIntensity, 0.0f, 3.0f);
-        ImGui::SliderFloat("Sky intensity", &settings.skyIntensity, 0.0f, 3.0f);
-        ImGui::BeginDisabled(!state.hasHdr);
-        if (ImGui::Checkbox("HDR environment (content/hdri/sky.hdr)", &state.useHdr)) {
-            state.environmentChanged = true;
-        }
-        ImGui::EndDisabled();
-    }
-
-    if (ImGui::CollapsingHeader(ICON_FA_CIRCLE_HALF_STROKE "  Shadows")) {
-        static const u32 sizes[] = {512, 1024, 2048, 4096};
-        int index = 0;
-        for (int i = 0; i < 4; ++i) {
-            if (sizes[i] == settings.shadowMapSize) {
-                index = i;
-            }
-        }
-        if (ImGui::Combo("Map size", &index, "512\0" "1024\0" "2048\0" "4096\0\0")) {
-            settings.shadowMapSize = sizes[index];
-        }
-        ImGui::SliderFloat("Depth bias", &settings.shadowBiasConstant, 0.0f, 10.0f);
-        ImGui::SliderFloat("Slope bias", &settings.shadowBiasSlope, 0.0f, 10.0f);
-        ImGui::SliderFloat("Normal bias (texels)", &settings.shadowNormalBias, 0.0f, 5.0f);
-    }
-
-    if (ImGui::CollapsingHeader(ICON_FA_CUBE "  Scene")) {
-        ImGui::Checkbox("Spin helmet", &state.spinHelmet);
-        ImGui::SliderFloat("Camera speed", &state.fly.speed, 0.1f, 50.0f, "%.1f m/s", ImGuiSliderFlags_Logarithmic);
-        ImGui::TextDisabled("Hold right mouse + WASD/QE to fly, scroll = speed");
-    }
-
-    if (ImGui::CollapsingHeader(ICON_FA_CODE "  Shaders", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::TextDisabled("Edit any file in shaders/ and save: it recompiles live.");
-        const std::string& error = renderer.shaderError();
-        if (error.empty()) {
-            ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), ICON_FA_CHECK "  All shaders compiled");
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), ICON_FA_TRIANGLE_EXCLAMATION "  Compile error:");
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::TextUnformatted(error.c_str());
-            ImGui::PopTextWrapPos();
-        }
-    }
-    ImGui::End();
 }
 
 fs::path screenshotPath()
 {
     const std::time_t now = std::time(nullptr);
     std::tm local{};
-#if defined(_WIN32)
     localtime_s(&local, &now);
-#else
-    localtime_r(&now, &local);
-#endif
     char name[64];
     std::strftime(name, sizeof(name), "ember-%Y%m%d-%H%M%S.png", &local);
     return fs::path(EMBER_CONTENT_DIR).parent_path() / "screenshots" / name;
 }
 
+// --- Systems: plain functions that loop over components ------------------------------------
+
+void spinSystem(scene::Scene& scene, f32 dt)
+{
+    for (auto [entity, spin, transform] : scene.registry().view<scene::Spin, scene::Transform>().each()) {
+        if (glm::length(spin.axis) > 0.0f) {
+            transform.rotation = glm::normalize(glm::angleAxis(spin.speed * dt, glm::normalize(spin.axis)) * transform.rotation);
+        }
+    }
+}
+
+// Makes sure every model the scene references is loaded and uploaded, and drops the ones no longer used.
+void syncModels(App& app)
+{
+    EMBER_PROFILE_FUNCTION();
+    for (auto& [guid, loaded] : app.models) {
+        loaded.usedThisFrame = guid == kTestSceneModel;
+    }
+    for (auto [entity, mesh] : app.scene.registry().view<scene::MeshRenderer>().each()) {
+        if (!mesh.model.isValid()) {
+            continue;
+        }
+        auto [it, inserted] = app.models.try_emplace(mesh.model);
+        if (inserted) {
+            app.assets->acquire(mesh.model);
+        }
+        LoadedModel& loaded = it->second;
+        loaded.usedThisFrame = true;
+        if (mesh.model == kTestSceneModel) {
+            continue;
+        }
+        // New data (first load or hot reload): upload it, replacing the old GPU copy.
+        const u32 version = app.assets->version(mesh.model);
+        if (version != loaded.version && app.assets->state(mesh.model) == asset::AssetState::Ready) {
+            app.device->waitIdle(); // the old copy may still be in use by in-flight frames
+            app.renderer->destroyModel(loaded.handle);
+            loaded.handle = app.renderer->uploadModel(*app.assets->model(mesh.model));
+            loaded.version = version;
+        }
+    }
+    for (auto it = app.models.begin(); it != app.models.end();) {
+        if (!it->second.usedThisFrame) {
+            app.renderer->destroyModel(it->second.handle);
+            app.assets->release(it->first);
+            it = app.models.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void syncEnvironment(App& app)
+{
+    if (!app.environmentAsset.isValid()) {
+        return;
+    }
+    const u32 version = app.assets->version(app.environmentAsset);
+    if (app.useHdr && app.assets->state(app.environmentAsset) == asset::AssetState::Ready &&
+        (!app.environmentApplied || version != app.environmentVersion)) {
+        app.renderer->setEnvironment(app.assets->environment(app.environmentAsset));
+        app.environmentVersion = version;
+        app.environmentApplied = true;
+    } else if (!app.useHdr && !app.environmentApplied) {
+        app.renderer->setEnvironment(nullptr);
+        app.environmentApplied = true;
+    }
+}
+
+// Builds the renderer's flat snapshot from the ECS. The renderer never sees entities.
+void extractRenderScene(App& app)
+{
+    EMBER_PROFILE_FUNCTION();
+    render::RenderScene& out = app.renderScene;
+    out.instances.clear(); // keeps its capacity: no allocation in the steady state
+    entt::registry& registry = app.scene.registry();
+    for (auto [entity, mesh, world] : registry.view<scene::MeshRenderer, scene::WorldTransform>().each()) {
+        const auto it = app.models.find(mesh.model);
+        if (it != app.models.end() && it->second.handle.isValid()) {
+            out.instances.push_back({it->second.handle, world.matrix});
+        }
+    }
+    const auto lights = registry.view<scene::DirectionalLight, scene::WorldTransform>();
+    if (lights.begin() != lights.end()) { // one sun: the first light found
+        const auto [light, world] = lights.get(*lights.begin());
+        out.sun.direction = glm::normalize(vec3(world.matrix[2])); // the light shines along -Z
+        out.sun.color = light.color;
+        out.sun.intensity = light.intensity;
+    }
+}
+
 } // namespace
+
+void FlyCamera::update(render::Camera& camera, platform::Window& window, f32 dt)
+{
+    const bool looking = window.isMouseDown(platform::MouseButton::Right);
+    window.setRelativeMouseMode(looking);
+    if (looking) {
+        constexpr f32 sensitivity = 0.0025f;
+        camera.yaw -= window.mouseDeltaX() * sensitivity;
+        camera.pitch = glm::clamp(camera.pitch - window.mouseDeltaY() * sensitivity, -1.55f, 1.55f);
+        speed = glm::clamp(speed * std::pow(1.2f, window.scrollDelta()), 0.1f, 200.0f);
+    }
+    using platform::Key;
+    vec3 move(0.0f);
+    move += camera.forward() * (static_cast<f32>(window.isKeyDown(Key::W)) - static_cast<f32>(window.isKeyDown(Key::S)));
+    move += camera.right() * (static_cast<f32>(window.isKeyDown(Key::D)) - static_cast<f32>(window.isKeyDown(Key::A)));
+    move.y += static_cast<f32>(window.isKeyDown(Key::E)) - static_cast<f32>(window.isKeyDown(Key::Q));
+    if (glm::length(move) > 0.0f) {
+        const f32 boost = window.isKeyDown(Key::LeftShift) ? 4.0f : 1.0f;
+        camera.position += glm::normalize(move) * speed * boost * dt;
+    }
+}
+
+void setSunAngles(App& app, f32 azimuthDegrees, f32 elevationDegrees)
+{
+    for (auto [entity, light, transform] : app.scene.registry().view<scene::DirectionalLight, scene::Transform>().each()) {
+        const f32 az = glm::radians(azimuthDegrees);
+        const f32 el = glm::radians(elevationDegrees);
+        const vec3 towardSun(std::cos(el) * std::sin(az), std::sin(el), std::cos(el) * std::cos(az));
+        transform.rotation = glm::quatLookAt(-towardSun, vec3(0, 1, 0)); // -Z points where the light travels
+    }
+}
+
+void buildDefaultScene(App& app)
+{
+    scene::Scene& scene = app.scene;
+    scene.clear();
+    app.selected = scene::kNullEntity;
+
+    const scene::Entity sun = scene.create("Sun");
+    scene.registry().emplace<scene::DirectionalLight>(sun);
+    setSunAngles(app, 35.0f, 40.0f);
+
+    const scene::Entity shapes = scene.create("Test shapes");
+    scene.registry().emplace<scene::MeshRenderer>(shapes, kTestSceneModel);
+
+    // A spinning pivot with the helmet as its child: shows the hierarchy at work.
+    const scene::Entity pivot = scene.create("Turntable");
+    scene.registry().get<scene::Transform>(pivot).position = vec3(0.0f, 1.1f, 0.0f);
+    scene.registry().emplace<scene::Spin>(pivot, scene::Spin{vec3(0, 1, 0), 0.4f});
+
+    const Guid helmet = app.assets->findBySource("models/DamagedHelmet/DamagedHelmet.glb");
+    if (helmet.isValid()) {
+        const scene::Entity e = scene.create("Damaged Helmet", pivot);
+        scene.registry().get<scene::Transform>(e).scale = vec3(0.8f);
+        scene.registry().emplace<scene::MeshRenderer>(e, helmet);
+    } else {
+        EMBER_LOG_WARN("Helmet not cooked. Run tools/fetch-sample-content.ps1, then rebuild.");
+    }
+    scene.updateTransforms();
+}
+
+} // namespace sandbox
+
+using namespace sandbox;
 
 int main(int argc, char** argv)
 {
     EMBER_LOG_INFO("Ember sandbox starting");
-    const Options options = parseOptions(argc, argv);
+    App app;
+    app.options = parseOptions(argc, argv);
+    const Options& options = app.options;
 
-    auto window = platform::Window::create({.title = "Ember Sandbox", .width = 1600, .height = 900});
-    if (!window) {
+    app.window = platform::Window::create({.title = "Ember Sandbox", .width = 1600, .height = 900});
+    if (!app.window) {
         return 1;
     }
-
     rhi::DeviceDesc deviceDesc;
-    deviceDesc.window = window->nativeHandle();
-    deviceDesc.width = window->width();
-    deviceDesc.height = window->height();
+    deviceDesc.window = app.window->nativeHandle();
+    deviceDesc.width = app.window->width();
+    deviceDesc.height = app.window->height();
 #if defined(EMBER_DEBUG)
     deviceDesc.enableValidation = options.validation;
 #endif
+    app.device = rhi::Device::create(deviceDesc);
+    if (!app.device) {
+        return 1;
+    }
+    app.renderer = render::Renderer::create(*app.device);
+    if (!app.renderer) {
+        return 1;
+    }
+    app.renderer->settings().debugView = static_cast<render::DebugView>(options.debugView);
 
-    auto device = rhi::Device::create(deviceDesc);
-    if (!device) {
-        return 1;
-    }
-    auto renderer = render::Renderer::create(*device);
-    if (!renderer) {
-        return 1;
-    }
+    app.jobs = std::make_unique<JobSystem>();
+    app.assets = std::make_unique<asset::AssetManager>(
+        asset::AssetManagerDesc{.contentDir = EMBER_CONTENT_DIR, .cookedDir = EMBER_COOKED_DIR, .cookerExe = EMBER_COOKER_EXE},
+        *app.jobs);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -319,133 +320,113 @@ int main(int argc, char** argv)
     debugui::applyTheme({
         .fontDirectory = EMBER_CONTENT_DIR "/fonts",
         .fontSize = 16.0f,
-        .dpiScale = window->displayScale(),
-        .linearOutput = device->isBackbufferSrgb(),
+        .dpiScale = app.window->displayScale(),
+        .linearOutput = app.device->isBackbufferSrgb(),
     });
-    window->initImGui();
-    device->initImGui();
+    app.window->initImGui();
+    app.device->initImGui();
 
     // --- Scene ---------------------------------------------------------------------------------
-    SandboxState state;
-    state.scene.camera.position = vec3(0.0f, 1.6f, 4.5f);
-    state.scene.camera.pitch = glm::radians(-10.0f);
-    if (options.camera) {
-        const auto& c = *options.camera;
-        state.scene.camera.position = vec3(c[0], c[1], c[2]);
-        state.scene.camera.yaw = glm::radians(c[3]);
-        state.scene.camera.pitch = glm::radians(c[4]);
+    {
+        const render::ModelHandle shapes = app.renderer->uploadModel(makeTestShapes());
+        app.models[kTestSceneModel] = LoadedModel{shapes, 1, true};
+    }
+    if (!(fs::exists(options.scenePath) && options.capture.empty() && app.scene.loadFile(options.scenePath))) {
+        buildDefaultScene(app); // automated captures always use the default scene
     }
     if (options.sun) {
-        state.sunAzimuth = glm::radians((*options.sun)[0]);
-        state.sunElevation = glm::radians((*options.sun)[1]);
+        setSunAngles(app, (*options.sun)[0], (*options.sun)[1]);
     }
-    renderer->settings().debugView = static_cast<render::DebugView>(options.debugView);
-
-    const render::ModelHandle testScene = renderer->uploadModel(makeTestScene());
-    state.scene.instances.push_back({testScene, mat4(1.0f)});
-
-    if (fs::exists(options.model)) {
-        if (std::optional<asset::Model> model = asset::loadGltf(options.model)) {
-            state.helmet = renderer->uploadModel(*model);
-        }
-    } else {
-        EMBER_LOG_WARN("{} not found. Run tools/fetch-sample-content.ps1 to download sample assets.",
-                       options.model.string());
-    }
-    if (state.helmet.isValid()) {
-        state.scene.instances.push_back({state.helmet, mat4(1.0f)});
+    app.environmentAsset = app.assets->findBySource("hdri/sky.hdr");
+    app.useHdr = options.useHdr && app.environmentAsset.isValid();
+    if (app.environmentAsset.isValid()) {
+        app.assets->acquire(app.environmentAsset);
     }
 
-    std::optional<asset::HdrImage> hdr;
-    if (fs::exists(options.hdr)) {
-        hdr = asset::loadHdr(options.hdr);
+    render::Camera& camera = app.renderScene.camera;
+    camera.position = vec3(0.0f, 1.6f, 4.5f);
+    camera.pitch = glm::radians(-10.0f);
+    if (options.camera) {
+        const auto& c = *options.camera;
+        camera.position = vec3(c[0], c[1], c[2]);
+        camera.yaw = glm::radians(c[3]);
+        camera.pitch = glm::radians(c[4]);
     }
-    state.hasHdr = hdr.has_value();
-    state.useHdr = options.useHdr && state.hasHdr;
-    renderer->setEnvironment(state.useHdr ? &*hdr : nullptr);
-
     if (!options.capture.empty()) {
-        state.spinHelmet = false; // deterministic screenshots
+        app.scene.registry().clear<scene::Spin>(); // deterministic screenshots
     }
 
     // --- Main loop -----------------------------------------------------------------------------
-    u32 frameCount = 0;
+    u32 readyFrames = 0;
     auto lastTime = std::chrono::steady_clock::now();
     while (true) {
-        window->pollEvents();
-        if (window->shouldClose()) {
+        app.window->pollEvents();
+        if (app.window->shouldClose()) {
             break;
         }
-        if (window->isMinimized()) {
+        if (app.window->isMinimized()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
-        if (window->consumeResized()) {
-            device->resize(window->width(), window->height());
+        if (app.window->consumeResized()) {
+            app.device->resize(app.window->width(), app.window->height());
         }
-
         const auto now = std::chrono::steady_clock::now();
         const f32 dt = std::min(std::chrono::duration<f32>(now - lastTime).count(), 0.1f);
         lastTime = now;
 
-        renderer->reloadChangedShaders();
-        if (state.environmentChanged) {
-            renderer->setEnvironment(state.useHdr ? &*hdr : nullptr);
-            state.environmentChanged = false;
-        }
+        // Systems, in order.
+        app.assets->update();
+        app.renderer->reloadChangedShaders();
+        app.fly.update(camera, *app.window, dt);
+        spinSystem(app.scene, dt);
+        app.scene.updateTransforms(app.jobs.get());
+        syncModels(app);
+        syncEnvironment(app);
+        extractRenderScene(app);
 
-        // Update the scene snapshot.
-        state.fly.update(state.scene.camera, *window, dt);
-        state.scene.sun.direction = vec3(std::cos(state.sunElevation) * std::sin(state.sunAzimuth),
-                                         std::sin(state.sunElevation),
-                                         std::cos(state.sunElevation) * std::cos(state.sunAzimuth));
-        if (state.helmet.isValid()) {
-            if (state.spinHelmet) {
-                state.helmetAngle += dt * 0.4f;
-            }
-            // Lift the helmet off the ground and turn it slowly (its glTF nodes already orient it upright).
-            state.scene.instances.back().transform = glm::translate(mat4(1.0f), vec3(0.0f, 1.1f, 0.0f)) *
-                                                     glm::rotate(mat4(1.0f), state.helmetAngle, vec3(0, 1, 0)) *
-                                                     glm::scale(mat4(1.0f), vec3(0.8f));
-        }
-
-        device->beginImGuiFrame();
-        window->beginImGuiFrame();
+        app.device->beginImGuiFrame();
+        app.window->beginImGuiFrame();
         ImGui::NewFrame();
-        drawDebugUi(state, *device, *renderer);
+        drawEditor(app);
         ImGui::Render();
 
-        const bool lastCaptureFrame = !options.capture.empty() && frameCount + 1 >= options.captureFrames;
-        if (window->wasKeyPressed(platform::Key::F12) || state.requestScreenshot) {
-            renderer->requestCapture(screenshotPath());
-            state.requestScreenshot = false;
+        // Automated captures wait until every asset has finished loading.
+        const bool assetsSettled = app.assets->loadsInFlight() == 0;
+        const bool lastCaptureFrame = !options.capture.empty() && assetsSettled && readyFrames + 1 >= options.captureFrames;
+        if (app.window->wasKeyPressed(platform::Key::F12) || app.requestScreenshot) {
+            app.renderer->requestCapture(screenshotPath());
+            app.requestScreenshot = false;
         }
         if (lastCaptureFrame) {
-            renderer->requestCapture(options.capture);
+            app.renderer->requestCapture(options.capture);
         }
 
-        if (rhi::CommandList* cmd = device->beginFrame()) {
-            renderer->render(*cmd, state.scene);
-            if (options.capture.empty()) {
-                device->renderImGui(*cmd); // keep automated screenshots free of UI
+        if (rhi::CommandList* cmd = app.device->beginFrame()) {
+            app.renderer->render(*cmd, app.renderScene);
+            if (options.capture.empty() || options.captureUi) {
+                app.device->renderImGui(*cmd);
             }
-            device->endFrame();
-            ++frameCount;
+            app.renderer->recordCapture(*cmd);
+            app.device->endFrame();
+            readyFrames += assetsSettled ? 1 : 0;
         }
         EMBER_PROFILE_FRAME();
-
         if (lastCaptureFrame) {
             break;
         }
     }
 
-    device->waitIdle();
-    renderer->finishCapture();
-    renderer.reset();
-    device->shutdownImGui();
-    window->shutdownImGui();
+    app.device->waitIdle();
+    app.renderer->finishCapture();
+    for (auto& [guid, loaded] : app.models) {
+        app.renderer->destroyModel(loaded.handle);
+    }
+    app.assets.reset();
+    app.renderer.reset();
+    app.device->shutdownImGui();
+    app.window->shutdownImGui();
     ImGui::DestroyContext();
-
     EMBER_LOG_INFO("Shutting down");
     return 0;
 }

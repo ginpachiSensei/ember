@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ember/core/Math.h"
+#include "ember/core/Memory.h"
 #include "ember/core/SlotMap.h"
 #include "ember/rhi/Device.h"
 
@@ -47,7 +48,7 @@ struct RenderInstance {
 struct RenderScene {
     Camera camera;
     DirectionalLight sun;
-    std::vector<RenderInstance> instances;
+    std::vector<RenderInstance, memory::TrackedAllocator<RenderInstance, memory::Tag::Render>> instances;
 };
 
 enum class Tonemapper : u32 { None, Reinhard, Aces, AgX, PbrNeutral };
@@ -66,6 +67,8 @@ struct RenderSettings {
 };
 
 struct RenderStats {
+    usize frameMemoryUsed = 0; // the renderer's per-frame scratch (draw list)
+    usize frameMemoryCapacity = 0;
     u32 drawCalls = 0;
     u32 triangles = 0;
     u32 shadowDrawCalls = 0;
@@ -104,8 +107,10 @@ public:
     bool reloadChangedShaders();
     const std::string& shaderError() const; // last compile error, empty if none
 
-    // Saves the next rendered frame as a PNG. Written by the next render() call or finishCapture().
+    // Saves a frame as a PNG: requestCapture(), then recordCapture(cmd) as the last thing in a frame
+    // (after any UI). The file is written by the next render() call or finishCapture().
     void requestCapture(const std::filesystem::path& path);
+    void recordCapture(rhi::CommandList& cmd); // no-op unless a capture was requested
     void finishCapture(); // call after Device::waitIdle() to write a pending capture immediately
 
     RenderSettings& settings();

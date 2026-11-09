@@ -44,10 +44,15 @@ Optional sample assets (the Damaged Helmet glTF and a CC0 sky HDR), not stored i
 .	oolsetch-sample-content.ps1
 ```
 
+Building also cooks `content/` into `build/cooked/` (the `ember_cook` target). New source files get a
+`.meta` file with a permanent Guid the first time they're cooked.
+
 **Sandbox controls:** hold the right mouse button and use WASD/QE to fly (Shift = faster,
 scroll = speed). F12 saves a screenshot to `screenshots/`. Esc quits.
-Shaders in `shaders/` recompile when you save them while the sandbox runs.
+Shaders in `shaders/` recompile when you save them while the sandbox runs, and assets in `content/`
+re-cook and reload the same way. The Scene panel shows the entity hierarchy (drag to reparent), the
+Inspector edits any component, and Save/Load write `content/scenes/sandbox.scene.json`.
 
-Useful flags: `--hdr content/hdri/sky.hdr` (photo sky instead of the procedural one),
-`--capture out.png` (render a few frames, save, exit), `--view 2` (debug views),
+Useful flags: `--hdr` (photo sky instead of the procedural one), `--scene <file>`,
+`--capture out.png` (render once assets are loaded, save, exit; add `--capture-ui` to include the UI), `--view 2` (debug views),
 `--camera x,y,z,yaw,pitch`, `--sun azimuth,elevation`.
