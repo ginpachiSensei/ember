@@ -6,6 +6,11 @@
     "volk",
     "vulkan-headers",
     "vulkan-memory-allocator",
+    "vulkan-validationlayers",
+    "shader-slang",
+    "glm",
+    "cgltf",
+    "stb",
     "doctest",
     "tracy",
     {

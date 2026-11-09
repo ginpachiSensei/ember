@@ -17,8 +17,8 @@ The long-term goal is to understand and implement the ideas behind UE5-class tec
    [Environment]::SetEnvironmentVariable("VCPKG_ROOT", "$HOME\vcpkg", "User")
    ```
    Then restart your terminal / VS Code so `VCPKG_ROOT` is picked up.
-3. **Vulkan SDK** (optional for now, needed later): <https://vulkan.lunarg.com>.
-   Gives you the validation layers (Debug builds report API misuse) and the Slang shader compiler.
+3. No Vulkan SDK needed: vcpkg provides the validation layer and the Slang shader compiler.
+   (Install the SDK anyway if you want tools like `vkconfig`.)
 
 ## Build and run
 
@@ -38,4 +38,16 @@ cmake --build --preset debug
 ctest --preset debug            # unit tests
 ```
 
-Press **Esc** to close the sandbox.
+Optional sample assets (the Damaged Helmet glTF and a CC0 sky HDR), not stored in git:
+
+```powershell
+.	oolsetch-sample-content.ps1
+```
+
+**Sandbox controls:** hold the right mouse button and use WASD/QE to fly (Shift = faster,
+scroll = speed). F12 saves a screenshot to `screenshots/`. Esc quits.
+Shaders in `shaders/` recompile when you save them while the sandbox runs.
+
+Useful flags: `--hdr content/hdri/sky.hdr` (photo sky instead of the procedural one),
+`--capture out.png` (render a few frames, save, exit), `--view 2` (debug views),
+`--camera x,y,z,yaw,pitch`, `--sun azimuth,elevation`.

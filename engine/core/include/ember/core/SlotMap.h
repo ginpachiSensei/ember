@@ -23,10 +23,11 @@ struct Handle {
 // Stores objects in a dense array and hands out Handles to them.
 // Lookups are O(1); removed slots are reused.
 // Uses std containers for now; custom allocators come with the memory system.
-template <typename T>
+// Tag picks the handle type, so a backend can store VulkanBuffer but hand out Handle<BufferTag>.
+template <typename T, typename Tag = T>
 class SlotMap {
 public:
-    using HandleType = Handle<T>;
+    using HandleType = Handle<Tag>;
 
     template <typename... Args>
     HandleType emplace(Args&&... args)
@@ -65,6 +66,17 @@ public:
     const T* get(HandleType handle) const
     {
         return const_cast<SlotMap*>(this)->get(handle);
+    }
+
+    // Calls fn(T&) for every live object.
+    template <typename Fn>
+    void forEach(Fn&& fn)
+    {
+        for (Slot& slot : m_slots) {
+            if (slot.value) {
+                fn(*slot.value);
+            }
+        }
     }
 
     bool contains(HandleType handle) const { return get(handle) != nullptr; }

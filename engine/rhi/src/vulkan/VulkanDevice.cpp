@@ -1,10 +1,6 @@
-#include "ember/rhi/Device.h"
+#include "VulkanCommon.h"
 
-#include "ember/core/Assert.h"
-#include "ember/core/Log.h"
 #include "ember/core/Profile.h"
-
-#include "VmaUsage.h"
 
 #if defined(_WIN32)
 #include <vulkan/vulkan_win32.h>
@@ -14,17 +10,10 @@
 #include <imgui_impl_vulkan.h>
 
 #include <algorithm>
-#include <array>
-#include <cstdlib>
 #include <cstring>
 #include <optional>
-#include <vector>
 
 namespace ember::rhi {
-
-namespace {
-
-constexpr u32 kFramesInFlight = 2;
 
 const char* vkResultName(VkResult result)
 {
@@ -47,25 +36,17 @@ const char* vkResultName(VkResult result)
     }
 }
 
-} // namespace
-
-// Any failure here is a bug or a broken driver, so we stop immediately with a clear message.
-#define EMBER_VK_CHECK(expr)                                                        \
-    do {                                                                            \
-        const VkResult result_ = (expr);                                            \
-        if (result_ != VK_SUCCESS) {                                                \
-            EMBER_LOG_FATAL("{} failed: {} ({}:{})", #expr, vkResultName(result_),  \
-                            __FILE__, __LINE__);                                    \
-            std::abort();                                                           \
-        }                                                                           \
-    } while (0)
-
 namespace {
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                              VkDebugUtilsMessageTypeFlagsEXT,
                                              const VkDebugUtilsMessengerCallbackDataEXT* data, void*)
 {
+    // The loader reports harmless setup details (like registry lookups) as warnings; skip those.
+    if (data->pMessageIdName && std::strcmp(data->pMessageIdName, "Loader Message") == 0 &&
+        !(severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)) {
+        return VK_FALSE;
+    }
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
         EMBER_LOG_ERROR("[vulkan] {}", data->pMessage);
     } else {
@@ -116,93 +97,124 @@ bool hasDeviceExtension(VkPhysicalDevice gpu, const char* name)
                        [&](const VkExtensionProperties& e) { return std::strcmp(e.extensionName, name) == 0; });
 }
 
-// Records an image layout transition using synchronization2.
-void transitionImage(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
-                     VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
-                     VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess)
-{
-    VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = srcStage;
-    barrier.srcAccessMask = srcAccess;
-    barrier.dstStageMask = dstStage;
-    barrier.dstAccessMask = dstAccess;
-    barrier.oldLayout = oldLayout;
-    barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+// Features every Ember pipeline relies on. Checked when picking the GPU and enabled on the device.
+struct FeatureChain {
+    VkPhysicalDeviceFeatures2 core{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    VkPhysicalDeviceVulkan11Features v11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceVulkan13Features v13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
 
-    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dependency.imageMemoryBarrierCount = 1;
-    dependency.pImageMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(cmd, &dependency);
+    FeatureChain()
+    {
+        core.pNext = &v11;
+        v11.pNext = &v12;
+        v12.pNext = &v13;
+    }
+    FeatureChain(const FeatureChain&) = delete;
+    FeatureChain& operator=(const FeatureChain&) = delete;
+
+    // Fills in what Ember needs.
+    void request()
+    {
+        core.features.samplerAnisotropy = VK_TRUE;
+        core.features.depthClamp = VK_TRUE;
+        core.features.shaderInt64 = VK_TRUE;      // 64-bit buffer pointers
+        core.features.shaderInt16 = VK_TRUE;
+        core.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+        core.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+        core.features.multiDrawIndirect = VK_TRUE;
+        core.features.drawIndirectFirstInstance = VK_TRUE;
+        core.features.fillModeNonSolid = VK_TRUE;
+        v11.shaderDrawParameters = VK_TRUE;
+        v12.bufferDeviceAddress = VK_TRUE;
+        v12.scalarBlockLayout = VK_TRUE; // C++ structs and shader structs share the same tight layout
+        v12.timelineSemaphore = VK_TRUE;
+        v12.descriptorIndexing = VK_TRUE;
+        v12.runtimeDescriptorArray = VK_TRUE;
+        v12.descriptorBindingPartiallyBound = VK_TRUE;
+        v12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        v12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+        v12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+        v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        v12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+        v12.samplerFilterMinmax = VK_TRUE; // min-reduction for the Hi-Z pyramid (phase 5)
+        v12.drawIndirectCount = VK_TRUE;
+        v12.shaderFloat16 = VK_TRUE;
+        v12.storageBuffer8BitAccess = VK_TRUE;
+        v12.vulkanMemoryModel = VK_TRUE;
+        v12.vulkanMemoryModelDeviceScope = VK_TRUE;
+        v13.dynamicRendering = VK_TRUE;
+        v13.synchronization2 = VK_TRUE;
+        v13.maintenance4 = VK_TRUE;
+        v13.shaderDemoteToHelperInvocation = VK_TRUE; // what `discard` compiles to in SPIR-V 1.6
+    }
+
+    // Returns the name of the first requested feature `supported` lacks, or nullptr.
+    const char* firstMissing(const FeatureChain& supported) const
+    {
+#define EMBER_CHECK_FEATURE(field)                       \
+    if (field && !supported.field) {                     \
+        return #field;                                   \
+    }
+        EMBER_CHECK_FEATURE(core.features.samplerAnisotropy)
+        EMBER_CHECK_FEATURE(core.features.depthClamp)
+        EMBER_CHECK_FEATURE(core.features.shaderInt64)
+        EMBER_CHECK_FEATURE(core.features.shaderInt16)
+        EMBER_CHECK_FEATURE(core.features.shaderStorageImageWriteWithoutFormat)
+        EMBER_CHECK_FEATURE(core.features.shaderStorageImageReadWithoutFormat)
+        EMBER_CHECK_FEATURE(core.features.multiDrawIndirect)
+        EMBER_CHECK_FEATURE(core.features.drawIndirectFirstInstance)
+        EMBER_CHECK_FEATURE(core.features.fillModeNonSolid)
+        EMBER_CHECK_FEATURE(v11.shaderDrawParameters)
+        EMBER_CHECK_FEATURE(v12.bufferDeviceAddress)
+        EMBER_CHECK_FEATURE(v12.scalarBlockLayout)
+        EMBER_CHECK_FEATURE(v12.timelineSemaphore)
+        EMBER_CHECK_FEATURE(v12.descriptorIndexing)
+        EMBER_CHECK_FEATURE(v12.runtimeDescriptorArray)
+        EMBER_CHECK_FEATURE(v12.descriptorBindingPartiallyBound)
+        EMBER_CHECK_FEATURE(v12.descriptorBindingSampledImageUpdateAfterBind)
+        EMBER_CHECK_FEATURE(v12.descriptorBindingStorageImageUpdateAfterBind)
+        EMBER_CHECK_FEATURE(v12.descriptorBindingUpdateUnusedWhilePending)
+        EMBER_CHECK_FEATURE(v12.shaderSampledImageArrayNonUniformIndexing)
+        EMBER_CHECK_FEATURE(v12.shaderStorageImageArrayNonUniformIndexing)
+        EMBER_CHECK_FEATURE(v12.samplerFilterMinmax)
+        EMBER_CHECK_FEATURE(v12.drawIndirectCount)
+        EMBER_CHECK_FEATURE(v12.shaderFloat16)
+        EMBER_CHECK_FEATURE(v12.storageBuffer8BitAccess)
+        EMBER_CHECK_FEATURE(v12.vulkanMemoryModel)
+        EMBER_CHECK_FEATURE(v12.vulkanMemoryModelDeviceScope)
+        EMBER_CHECK_FEATURE(v13.dynamicRendering)
+        EMBER_CHECK_FEATURE(v13.synchronization2)
+        EMBER_CHECK_FEATURE(v13.maintenance4)
+        EMBER_CHECK_FEATURE(v13.shaderDemoteToHelperInvocation)
+#undef EMBER_CHECK_FEATURE
+        return nullptr;
+    }
+};
+
+Format fromVk(VkFormat format)
+{
+    switch (format) {
+    case VK_FORMAT_B8G8R8A8_SRGB: return Format::BGRA8Srgb;
+    case VK_FORMAT_R8G8B8A8_SRGB: return Format::RGBA8Srgb;
+    case VK_FORMAT_B8G8R8A8_UNORM: return Format::BGRA8Unorm;
+    case VK_FORMAT_R8G8B8A8_UNORM: return Format::RGBA8Unorm;
+    default: return Format::Unknown;
+    }
 }
 
-struct FrameData {
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkFence inFlight = VK_NULL_HANDLE;           // signaled when the GPU finished this frame
-    VkSemaphore imageAvailable = VK_NULL_HANDLE; // signaled when the swapchain image can be drawn to
-};
-
 } // namespace
-
-struct Device::Impl {
-    DeviceDesc desc;
-
-    VkInstance instance = VK_NULL_HANDLE;
-    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-
-    VkPhysicalDevice gpu = VK_NULL_HANDLE;
-    VkPhysicalDeviceProperties gpuProperties{};
-    u32 graphicsFamily = 0;
-
-    VkDevice device = VK_NULL_HANDLE;
-    VkQueue graphicsQueue = VK_NULL_HANDLE;
-    VmaAllocator allocator = VK_NULL_HANDLE;
-
-    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    VkFormat swapchainFormat = VK_FORMAT_UNDEFINED;
-    VkExtent2D swapchainExtent{};
-    u32 swapchainMinImageCount = 0;
-    std::vector<VkImage> swapchainImages;
-    std::vector<VkImageView> swapchainViews;
-    std::vector<VkSemaphore> renderFinished; // one per swapchain image, waited on by present
-
-    std::array<FrameData, kFramesInFlight> frames{};
-    u32 frameIndex = 0;
-    u32 imageIndex = 0;
-    bool frameActive = false;
-
-    bool swapchainDirty = false;
-    u32 pendingWidth = 0;
-    u32 pendingHeight = 0;
-
-    bool imguiEnabled = false;
-
-    bool init();
-    void shutdown();
-
-    bool createInstance();
-    bool createSurface();
-    bool pickGpu();
-    bool createDevice();
-    void createFrames();
-    bool createSwapchain(u32 width, u32 height);
-    void destroySwapchainObjects();
-    bool recreateSwapchain();
-};
 
 bool Device::Impl::init()
 {
     pendingWidth = desc.width;
     pendingHeight = desc.height;
+    frameCommandListImpl.device = this;
 
     if (!createInstance() || !createSurface() || !pickGpu() || !createDevice()) {
         return false;
     }
+    createBindless();
     createFrames();
     if (!createSwapchain(desc.width, desc.height)) {
         swapchainDirty = true; // e.g. started minimized; retry on the next frame
@@ -212,6 +224,17 @@ bool Device::Impl::init()
 
 bool Device::Impl::createInstance()
 {
+#if defined(EMBER_VK_LAYER_PATH) && defined(_WIN32)
+    // The validation layer comes from vcpkg instead of the Vulkan SDK; tell the loader where it is.
+    char* existing = nullptr;
+    usize existingLength = 0;
+    _dupenv_s(&existing, &existingLength, "VK_ADD_LAYER_PATH");
+    if (desc.enableValidation && !existing) {
+        _putenv_s("VK_ADD_LAYER_PATH", EMBER_VK_LAYER_PATH);
+    }
+    std::free(existing);
+#endif
+
     if (volkInitialize() != VK_SUCCESS) {
         EMBER_LOG_ERROR("Vulkan loader not found. Is a GPU driver with Vulkan support installed?");
         return false;
@@ -232,17 +255,18 @@ bool Device::Impl::createInstance()
     extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #endif
 
+    // Debug utils also gives object names and command labels in RenderDoc / Nsight, so use it when present.
+    if (hasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        debugUtils = true;
+    }
+
     std::vector<const char*> layers;
-    bool useDebugUtils = false;
     if (desc.enableValidation) {
         if (hasInstanceLayer("VK_LAYER_KHRONOS_validation")) {
             layers.push_back("VK_LAYER_KHRONOS_validation");
         } else {
-            EMBER_LOG_WARN("Validation layer not found. Install the Vulkan SDK to enable it.");
-        }
-        if (hasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
-            extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-            useDebugUtils = true;
+            EMBER_LOG_WARN("Validation layer not found (expected from vcpkg's vulkan-validationlayers).");
         }
     }
 
@@ -254,9 +278,10 @@ bool Device::Impl::createInstance()
 
     // Chaining the messenger info also reports problems inside vkCreateInstance itself.
     VkDebugUtilsMessengerCreateInfoEXT debugInfo = makeDebugMessengerInfo();
+    const bool useMessenger = debugUtils && !layers.empty();
 
     VkInstanceCreateInfo createInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    createInfo.pNext = useDebugUtils ? &debugInfo : nullptr;
+    createInfo.pNext = useMessenger ? &debugInfo : nullptr;
     createInfo.pApplicationInfo = &appInfo;
     createInfo.enabledLayerCount = static_cast<u32>(layers.size());
     createInfo.ppEnabledLayerNames = layers.data();
@@ -270,7 +295,7 @@ bool Device::Impl::createInstance()
     }
     volkLoadInstance(instance);
 
-    if (useDebugUtils) {
+    if (useMessenger) {
         EMBER_VK_CHECK(vkCreateDebugUtilsMessengerEXT(instance, &debugInfo, nullptr, &debugMessenger));
     }
     EMBER_LOG_INFO("Vulkan instance created (validation {})", layers.empty() ? "off" : "on");
@@ -312,6 +337,9 @@ bool Device::Impl::pickGpu()
     std::vector<VkPhysicalDevice> candidates(count);
     vkEnumeratePhysicalDevices(instance, &count, candidates.data());
 
+    FeatureChain required;
+    required.request();
+
     int bestScore = -1;
     for (VkPhysicalDevice candidate : candidates) {
         VkPhysicalDeviceProperties props;
@@ -320,22 +348,17 @@ bool Device::Impl::pickGpu()
             continue;
         }
 
-        VkPhysicalDeviceVulkan13Features features13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-        VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-        features12.pNext = &features13;
-        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-        features.pNext = &features12;
-        vkGetPhysicalDeviceFeatures2(candidate, &features);
-
-        if (!features13.dynamicRendering || !features13.synchronization2 || !features12.timelineSemaphore ||
-            !features12.bufferDeviceAddress) {
+        FeatureChain supported;
+        vkGetPhysicalDeviceFeatures2(candidate, &supported.core);
+        if (const char* missing = required.firstMissing(supported)) {
+            EMBER_LOG_INFO("Skipping GPU {}: missing feature {}", props.deviceName, missing);
             continue;
         }
         if (!hasDeviceExtension(candidate, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
             continue;
         }
 
-        // One queue family that can both draw and present keeps phase 0 simple.
+        // One queue family that can draw, compute and present keeps things simple for now.
         u32 familyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &familyCount, nullptr);
         std::vector<VkQueueFamilyProperties> families(familyCount);
@@ -345,7 +368,8 @@ bool Device::Impl::pickGpu()
         for (u32 i = 0; i < familyCount; ++i) {
             VkBool32 canPresent = VK_FALSE;
             vkGetPhysicalDeviceSurfaceSupportKHR(candidate, i, surface, &canPresent);
-            if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && canPresent) {
+            const VkQueueFlags needed = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+            if ((families[i].queueFlags & needed) == needed && canPresent) {
                 family = i;
                 break;
             }
@@ -366,7 +390,7 @@ bool Device::Impl::pickGpu()
     }
 
     if (gpu == VK_NULL_HANDLE) {
-        EMBER_LOG_ERROR("No GPU supports Vulkan 1.3 with dynamic rendering and synchronization2");
+        EMBER_LOG_ERROR("No GPU supports Vulkan 1.3 with the features Ember needs");
         return false;
     }
 
@@ -384,22 +408,13 @@ bool Device::Impl::createDevice()
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &queuePriority;
 
-    // Modern Vulkan baseline: no render pass objects, simpler barriers,
-    // timeline semaphores and GPU pointers (needed later for GPU-driven rendering).
-    VkPhysicalDeviceVulkan13Features features13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-    features13.dynamicRendering = VK_TRUE;
-    features13.synchronization2 = VK_TRUE;
-    VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    features12.pNext = &features13;
-    features12.timelineSemaphore = VK_TRUE;
-    features12.bufferDeviceAddress = VK_TRUE;
-    VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    features.pNext = &features12;
+    FeatureChain features;
+    features.request();
 
     const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
     VkDeviceCreateInfo createInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    createInfo.pNext = &features;
+    createInfo.pNext = &features.core;
     createInfo.queueCreateInfoCount = 1;
     createInfo.pQueueCreateInfos = &queueInfo;
     createInfo.enabledExtensionCount = 1;
@@ -428,6 +443,60 @@ bool Device::Impl::createDevice()
     return true;
 }
 
+void Device::Impl::createBindless()
+{
+    // One big table for the whole engine. Shaders index it with plain integers (see Bindless.slang).
+    const VkDescriptorSetLayoutBinding bindings[] = {
+        {kBindingSampled, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxSampledTextures, VK_SHADER_STAGE_ALL, nullptr},
+        {kBindingSamplers, VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers, VK_SHADER_STAGE_ALL, nullptr},
+        {kBindingStorage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxStorageImages, VK_SHADER_STAGE_ALL, nullptr},
+    };
+    // Partially bound: unused slots may stay empty. Update-after-bind: new textures can be added
+    // while earlier frames that use the table are still running on the GPU.
+    const VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                                           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+    const VkDescriptorBindingFlags bindingFlags[] = {flags, flags, flags};
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+    flagsInfo.bindingCount = 3;
+    flagsInfo.pBindingFlags = bindingFlags;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.pNext = &flagsInfo;
+    layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    layoutInfo.bindingCount = 3;
+    layoutInfo.pBindings = bindings;
+    EMBER_VK_CHECK(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &bindlessLayout));
+
+    const VkDescriptorPoolSize poolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxSampledTextures},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxStorageImages},
+    };
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 3;
+    poolInfo.pPoolSizes = poolSizes;
+    EMBER_VK_CHECK(vkCreateDescriptorPool(device, &poolInfo, nullptr, &bindlessPool));
+
+    VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocInfo.descriptorPool = bindlessPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &bindlessLayout;
+    EMBER_VK_CHECK(vkAllocateDescriptorSets(device, &allocInfo, &bindlessSet));
+
+    VkPushConstantRange pushRange{VK_SHADER_STAGE_ALL, 0, kMaxPushConstantSize};
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &bindlessLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    EMBER_VK_CHECK(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout));
+}
+
 void Device::Impl::createFrames()
 {
     for (FrameData& frame : frames) {
@@ -448,6 +517,13 @@ void Device::Impl::createFrames()
         VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         EMBER_VK_CHECK(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &frame.imageAvailable));
     }
+
+    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = graphicsFamily;
+    EMBER_VK_CHECK(vkCreateCommandPool(device, &poolInfo, nullptr, &immediatePool));
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    EMBER_VK_CHECK(vkCreateFence(device, &fenceInfo, nullptr, &immediateFence));
 }
 
 bool Device::Impl::createSwapchain(u32 width, u32 height)
@@ -505,7 +581,9 @@ bool Device::Impl::createSwapchain(u32 width, u32 height)
     createInfo.imageColorSpace = format.colorSpace;
     createInfo.imageExtent = extent;
     createInfo.imageArrayLayers = 1;
-    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // TRANSFER_SRC lets screenshots copy the image back to the CPU.
+    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                            (caps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     createInfo.preTransform = caps.currentTransform;
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -523,23 +601,33 @@ bool Device::Impl::createSwapchain(u32 width, u32 height)
     }
     swapchain = newSwapchain;
     swapchainFormat = format.format;
+    swapchainRhiFormat = fromVk(format.format);
     swapchainExtent = extent;
     swapchainMinImageCount = imageCount;
 
     u32 actualCount = 0;
     vkGetSwapchainImagesKHR(device, swapchain, &actualCount, nullptr);
-    swapchainImages.resize(actualCount);
-    vkGetSwapchainImagesKHR(device, swapchain, &actualCount, swapchainImages.data());
+    std::vector<VkImage> images(actualCount);
+    vkGetSwapchainImagesKHR(device, swapchain, &actualCount, images.data());
 
-    swapchainViews.resize(actualCount);
+    // Swapchain images are registered as ordinary textures, so render passes can target them like any other.
     renderFinished.resize(actualCount);
     for (u32 i = 0; i < actualCount; ++i) {
+        VulkanTexture texture;
+        texture.image = images[i];
+        texture.desc.width = extent.width;
+        texture.desc.height = extent.height;
+        texture.desc.format = swapchainRhiFormat;
+        texture.desc.usage = TextureUsage::ColorAttachment | TextureUsage::TransferDst | TextureUsage::TransferSrc;
+        texture.desc.debugName = "Backbuffer";
+
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        viewInfo.image = swapchainImages[i];
+        viewInfo.image = images[i];
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = swapchainFormat;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        EMBER_VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &swapchainViews[i]));
+        EMBER_VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &texture.view));
+        swapchainTextures.push_back(textures.emplace(std::move(texture)));
 
         VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         EMBER_VK_CHECK(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinished[i]));
@@ -552,15 +640,15 @@ bool Device::Impl::createSwapchain(u32 width, u32 height)
 
 void Device::Impl::destroySwapchainObjects()
 {
-    for (VkImageView view : swapchainViews) {
-        vkDestroyImageView(device, view, nullptr);
+    for (TextureHandle handle : swapchainTextures) {
+        vkDestroyImageView(device, texture(handle).view, nullptr);
+        textures.remove(handle);
     }
     for (VkSemaphore semaphore : renderFinished) {
         vkDestroySemaphore(device, semaphore, nullptr);
     }
-    swapchainViews.clear();
+    swapchainTextures.clear();
     renderFinished.clear();
-    swapchainImages.clear();
 }
 
 bool Device::Impl::recreateSwapchain()
@@ -577,6 +665,31 @@ bool Device::Impl::recreateSwapchain()
     return true;
 }
 
+void Device::Impl::runPendingDeletes(bool all)
+{
+    auto it = pendingDeletes.begin();
+    while (it != pendingDeletes.end()) {
+        if (all || it->frame <= completedFrame) {
+            it->destroy();
+            it = pendingDeletes.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Device::Impl::setDebugName(VkObjectType type, u64 object, const char* name)
+{
+    if (!debugUtils || !name) {
+        return;
+    }
+    VkDebugUtilsObjectNameInfoEXT info{VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT};
+    info.objectType = type;
+    info.objectHandle = object;
+    info.pObjectName = name;
+    vkSetDebugUtilsObjectNameEXT(device, &info);
+}
+
 void Device::Impl::shutdown()
 {
     if (device != VK_NULL_HANDLE) {
@@ -585,15 +698,27 @@ void Device::Impl::shutdown()
             ImGui_ImplVulkan_Shutdown();
             imguiEnabled = false;
         }
+        runPendingDeletes(true);
         for (FrameData& frame : frames) {
             vkDestroySemaphore(device, frame.imageAvailable, nullptr);
             vkDestroyFence(device, frame.inFlight, nullptr);
             vkDestroyCommandPool(device, frame.commandPool, nullptr); // also frees its command buffer
         }
+        vkDestroyCommandPool(device, immediatePool, nullptr);
+        vkDestroyFence(device, immediateFence, nullptr);
         destroySwapchainObjects();
         if (swapchain != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(device, swapchain, nullptr);
         }
+        if (textures.size() || buffers.size() || pipelines.size()) {
+            EMBER_LOG_WARN("RHI shutdown with live resources: {} textures, {} buffers, {} pipelines",
+                           textures.size(), buffers.size(), pipelines.size());
+        }
+        // Samplers are owned by the device for its whole life.
+        samplers.forEach([&](VulkanSampler& s) { vkDestroySampler(device, s.sampler, nullptr); });
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyDescriptorPool(device, bindlessPool, nullptr);
+        vkDestroyDescriptorSetLayout(device, bindlessLayout, nullptr);
         vmaDestroyAllocator(allocator);
         vkDestroyDevice(device, nullptr);
     }
@@ -606,17 +731,19 @@ void Device::Impl::shutdown()
         }
         vkDestroyInstance(instance, nullptr);
     }
-    *this = Impl{};
+    instance = VK_NULL_HANDLE;
+    device = VK_NULL_HANDLE;
 }
 
 // ---------------------------------------------------------------------------------------------
-// Public API
+// Public API: lifetime and frames
 // ---------------------------------------------------------------------------------------------
 
 std::unique_ptr<Device> Device::create(const DeviceDesc& desc)
 {
     auto impl = std::make_unique<Impl>();
     impl->desc = desc;
+    impl->frameCommandList.m_impl = &impl->frameCommandListImpl;
     if (!impl->init()) {
         impl->shutdown();
         return nullptr;
@@ -634,13 +761,13 @@ Device::~Device()
     m_impl->shutdown();
 }
 
-bool Device::beginFrame()
+CommandList* Device::beginFrame()
 {
     Impl& d = *m_impl;
     EMBER_ASSERT(!d.frameActive);
 
     if (d.swapchainDirty && !d.recreateSwapchain()) {
-        return false;
+        return nullptr;
     }
 
     FrameData& frame = d.frames[d.frameIndex];
@@ -650,6 +777,8 @@ bool Device::beginFrame()
         EMBER_PROFILE_SCOPE("Wait for GPU (fence)");
         EMBER_VK_CHECK(vkWaitForFences(d.device, 1, &frame.inFlight, VK_TRUE, UINT64_MAX));
     }
+    d.completedFrame = std::max(d.completedFrame, frame.frameNumber);
+    d.runPendingDeletes(false);
 
     VkResult acquire = VK_SUCCESS;
     {
@@ -659,7 +788,7 @@ bool Device::beginFrame()
     }
     if (acquire == VK_ERROR_OUT_OF_DATE_KHR) {
         d.swapchainDirty = true;
-        return false; // nothing was signaled, so it's safe to skip
+        return nullptr; // nothing was signaled, so it's safe to skip
     }
     if (acquire == VK_SUBOPTIMAL_KHR) {
         d.swapchainDirty = true; // still usable; rebuild after this frame
@@ -670,43 +799,22 @@ bool Device::beginFrame()
     // Only reset the fence once we know we will submit work that signals it.
     EMBER_VK_CHECK(vkResetFences(d.device, 1, &frame.inFlight));
     EMBER_VK_CHECK(vkResetCommandPool(d.device, frame.commandPool, 0));
+    frame.frameNumber = d.frameNumber;
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     EMBER_VK_CHECK(vkBeginCommandBuffer(frame.commandBuffer, &beginInfo));
+    vkCmdBindDescriptorSets(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipelineLayout, 0, 1,
+                            &d.bindlessSet, 0, nullptr);
+    vkCmdBindDescriptorSets(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipelineLayout, 0, 1,
+                            &d.bindlessSet, 0, nullptr);
 
-    // The previous contents are irrelevant (UNDEFINED); make the image ready to be rendered to.
-    transitionImage(frame.commandBuffer, d.swapchainImages[d.imageIndex], VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    // The previous contents of the swapchain image are irrelevant.
+    d.texture(d.swapchainTextures[d.imageIndex]).state = ResourceState::Undefined;
 
+    d.frameCommandListImpl.cmd = frame.commandBuffer;
     d.frameActive = true;
-    return true;
-}
-
-void Device::clearBackbuffer(const ClearColor& color)
-{
-    Impl& d = *m_impl;
-    EMBER_ASSERT(d.frameActive);
-    VkCommandBuffer cmd = d.frames[d.frameIndex].commandBuffer;
-
-    VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    attachment.imageView = d.swapchainViews[d.imageIndex];
-    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachment.clearValue.color = {{color.r, color.g, color.b, color.a}};
-
-    VkRenderingInfo renderingInfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    renderingInfo.renderArea = {{0, 0}, d.swapchainExtent};
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &attachment;
-
-    vkCmdBeginRendering(cmd, &renderingInfo);
-    // Draw calls go here in phase 1.
-    vkCmdEndRendering(cmd);
+    return &d.frameCommandList;
 }
 
 void Device::endFrame()
@@ -715,14 +823,12 @@ void Device::endFrame()
     EMBER_ASSERT(d.frameActive);
     FrameData& frame = d.frames[d.frameIndex];
 
-    transitionImage(frame.commandBuffer, d.swapchainImages[d.imageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE);
+    d.frameCommandList.barrier(d.swapchainTextures[d.imageIndex], ResourceState::Present);
     EMBER_VK_CHECK(vkEndCommandBuffer(frame.commandBuffer));
 
     VkSemaphoreSubmitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     waitInfo.semaphore = frame.imageAvailable;
-    waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    waitInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
     VkSemaphoreSubmitInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     signalInfo.semaphore = d.renderFinished[d.imageIndex];
@@ -759,7 +865,54 @@ void Device::endFrame()
     }
 
     d.frameIndex = (d.frameIndex + 1) % kFramesInFlight;
+    ++d.frameNumber;
     d.frameActive = false;
+}
+
+void Device::immediateSubmit(const std::function<void(CommandList&)>& record)
+{
+    EMBER_PROFILE_FUNCTION();
+    Impl& d = *m_impl;
+
+    VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocInfo.commandPool = d.immediatePool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    EMBER_VK_CHECK(vkAllocateCommandBuffers(d.device, &allocInfo, &cmd));
+
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    EMBER_VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipelineLayout, 0, 1, &d.bindlessSet, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipelineLayout, 0, 1, &d.bindlessSet, 0, nullptr);
+
+    CommandList::Impl listImpl{&d, cmd};
+    CommandList list;
+    list.m_impl = &listImpl;
+    record(list);
+
+    EMBER_VK_CHECK(vkEndCommandBuffer(cmd));
+    VkCommandBufferSubmitInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    commandInfo.commandBuffer = cmd;
+    VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    submit.commandBufferInfoCount = 1;
+    submit.pCommandBufferInfos = &commandInfo;
+    EMBER_VK_CHECK(vkQueueSubmit2(d.graphicsQueue, 1, &submit, d.immediateFence));
+    EMBER_VK_CHECK(vkWaitForFences(d.device, 1, &d.immediateFence, VK_TRUE, UINT64_MAX));
+    EMBER_VK_CHECK(vkResetFences(d.device, 1, &d.immediateFence));
+    vkFreeCommandBuffers(d.device, d.immediatePool, 1, &cmd);
+}
+
+TextureHandle Device::backbuffer() const
+{
+    EMBER_ASSERT(m_impl->frameActive);
+    return m_impl->swapchainTextures[m_impl->imageIndex];
+}
+
+Format Device::backbufferFormat() const
+{
+    return m_impl->swapchainRhiFormat;
 }
 
 void Device::resize(u32 width, u32 height)
@@ -795,6 +948,11 @@ bool Device::isBackbufferSrgb() const
     return format == VK_FORMAT_B8G8R8A8_SRGB || format == VK_FORMAT_R8G8B8A8_SRGB;
 }
 
+u32 Device::frameIndex() const
+{
+    return m_impl->frameIndex;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Dear ImGui
 // ---------------------------------------------------------------------------------------------
@@ -828,7 +986,7 @@ void Device::initImGui()
     info.Queue = d.graphicsQueue;
     info.DescriptorPoolSize = 64; // let the backend create its own small descriptor pool
     info.MinImageCount = std::max(2u, d.swapchainMinImageCount);
-    info.ImageCount = std::max(info.MinImageCount, static_cast<u32>(d.swapchainImages.size()));
+    info.ImageCount = std::max(info.MinImageCount, static_cast<u32>(d.swapchainTextures.size()));
     info.UseDynamicRendering = true;
     info.PipelineInfoMain.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     info.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
@@ -854,7 +1012,7 @@ void Device::beginImGuiFrame()
     ImGui_ImplVulkan_NewFrame();
 }
 
-void Device::renderImGui()
+void Device::renderImGui(CommandList& cmd)
 {
     EMBER_PROFILE_FUNCTION();
     Impl& d = *m_impl;
@@ -864,23 +1022,18 @@ void Device::renderImGui()
     if (!drawData) {
         return;
     }
-    VkCommandBuffer cmd = d.frames[d.frameIndex].commandBuffer;
 
-    VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    attachment.imageView = d.swapchainViews[d.imageIndex];
-    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // draw on top of what's already there
-    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-    VkRenderingInfo renderingInfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    renderingInfo.renderArea = {{0, 0}, d.swapchainExtent};
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &attachment;
-
-    vkCmdBeginRendering(cmd, &renderingInfo);
-    ImGui_ImplVulkan_RenderDrawData(drawData, cmd);
-    vkCmdEndRendering(cmd);
+    ScopedLabel label(cmd, "ImGui");
+    RenderingDesc rendering;
+    rendering.colorCount = 1;
+    rendering.colors[0].texture = backbuffer();
+    rendering.colors[0].load = LoadOp::Load; // draw on top of what's already there
+    cmd.beginRendering(rendering);
+    ImGui_ImplVulkan_RenderDrawData(drawData, cmd.m_impl->cmd);
+    cmd.endRendering();
+    // ImGui binds its own descriptor set; put the bindless table back for anything recorded later.
+    vkCmdBindDescriptorSets(cmd.m_impl->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipelineLayout, 0, 1,
+                            &d.bindlessSet, 0, nullptr);
 }
 
 } // namespace ember::rhi

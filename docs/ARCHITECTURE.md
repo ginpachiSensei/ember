@@ -29,11 +29,11 @@ Conventions: engine code doesn't throw exceptions (it returns errors or fails fa
 ```
 apps/        sandbox, editor, game
 runtime      engine loop, world, system scheduling          (planned)
-render       render graph + features (shadows, GI, post)    (planned)
+render       forward PBR renderer: shadows, IBL, sky, tonemap; shader hot reload (render graph: phase 3)
 physics / audio / anim                                      (planned)
-scene        ECS, transforms               asset  runtime loading, streaming   (planned)
+scene        ECS, transforms (planned)     asset  glTF/HDR loading, procedural shapes (cooker + streaming: phase 2)
 debugui      Dear ImGui theme (Inter + Font Awesome icons, ember-orange palette)
-rhi          Vulkan device, swapchain, command lists, resources
+rhi          Vulkan device, swapchain, bindless table, command lists, resources
 platform     window, input, files, threads, time
 core         types, log, assert, containers, handles, jobs, math, reflection
 
@@ -53,8 +53,8 @@ engine/<module>/include/ember/<module>/   public headers  (#include "ember/core/
 engine/<module>/src/                      implementation
 engine/<module>/tests/                    unit tests (doctest)
 apps/                                     executables
-shaders/                                  shader sources + headers shared with C++ (planned)
-tools/                                    offline tools (planned)
+shaders/                                  Slang sources; shaders/core/ = shared includes
+tools/                                    scripts now (fetch-sample-content.ps1), offline tools later
 content/                                  source assets (planned)
 cmake/                                    build helpers (ember_configure_target)
 ```
@@ -64,12 +64,20 @@ Each module is one static library target: `ember::core`, `ember::platform`, `emb
 ## RHI design (target)
 
 - Thin and explicit, shaped like Vulkan/D3D12 rather than OpenGL.
-- **Bindless**: one global descriptor heap. Shaders index textures and buffers by integer.
+- **Bindless**: one global descriptor set (sampled images, samplers, storage images) and one pipeline
+  layout with 128 bytes of push constants. Shaders index textures by integer and reach buffers
+  through 64-bit device addresses (`Vertex* vertices` in Slang). No per-draw descriptor sets.
+- Buffers and shaders share **scalar layout** (`-fvk-use-scalar-layout`), so C++ structs in
+  `render/src/GpuTypes.h` match `shaders/core/Common.slang` field for field.
+- **Texture states**: the RHI tracks each texture's state (`ResourceState`) and emits the barrier
+  when you ask for a new one. Storage textures stay in GENERAL layout.
+- **Conventions**: reverse-Z depth (1 = near, clear to 0, `Greater`), flipped viewport so clip
+  space is y-up, counter-clockwise front faces (glTF).
 - **Frames in flight** (2): per-frame command pools, fences and semaphores. Destruction is deferred until the GPU is done with a resource.
 - Queues: graphics, async compute, transfer.
 - The backend is chosen at compile time, so draws don't go through virtual calls.
 
-Phase 0 has a single `rhi::Device` that owns instance, device, swapchain and frame sync.
+`rhi::Device` owns the instance, device, swapchain, frame sync and every resource. Resources are handles; destroying one is deferred until the GPU has finished the frames that could use it.
 
 ## Renderer design (target)
 

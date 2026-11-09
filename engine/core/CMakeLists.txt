@@ -4,6 +4,8 @@ add_library(ember_core STATIC
 add_library(ember::core ALIAS ember_core)
 
 target_include_directories(ember_core PUBLIC include)
+find_package(glm CONFIG REQUIRED)
+target_link_libraries(ember_core PUBLIC glm::glm)
 ember_configure_target(ember_core "engine")
 
 if(EMBER_ENABLE_PROFILING)

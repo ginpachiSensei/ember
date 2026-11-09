@@ -8,16 +8,16 @@ headline features (Nanite, Lumen, Virtual Shadow Maps, TSR).
 - [x] Logging, asserts, `Handle`/`SlotMap` + unit tests
 - [x] SDL3 window
 - [x] Vulkan 1.3 device, swapchain, frames in flight, clear screen
-- [ ] Install the Vulkan SDK and confirm validation is clean
+- [x] Validation clean (layer comes from vcpkg's `vulkan-validationlayers`, no SDK needed)
 - [x] Tracy profiler integration (`EMBER_PROFILE_*` macros in `core/Profile.h`)
 - [x] Dear ImGui overlay (SDL3 input in `platform`, Vulkan drawing in `rhi`)
 
 ## Phase 1: Basic renderer
-- [ ] RHI resources: buffers, textures, pipelines, command lists
-- [ ] Slang shader compilation (offline tool + hot reload)
-- [ ] Triangle, then glTF meshes with a camera
-- [ ] PBR materials (GGX), image-based lighting
-- [ ] Directional shadow map, tonemapping
+- [x] RHI resources: buffers, textures, samplers, pipelines, command lists, deferred destruction
+- [x] Slang shader compilation (build step + runtime hot reload)
+- [x] glTF meshes (cgltf + stb_image) with a fly camera; procedural test shapes
+- [x] PBR materials (GGX), image-based lighting (procedural sky or HDR file)
+- [x] Directional shadow map (PCF), tonemapping (AgX, ACES, PBR Neutral, Reinhard)
 
 ## Phase 2: Engine core
 - [ ] Allocators (frame/linear, pool, general) + memory tracking
@@ -27,7 +27,7 @@ headline features (Nanite, Lumen, Virtual Shadow Maps, TSR).
 - [ ] Reflection + serialization
 
 ## Phase 3: Modern RHI
-- [ ] Bindless descriptors
+- [x] Bindless descriptors (done early in phase 1: it's the RHI's only binding model)
 - [ ] Render graph (barriers, transient aliasing)
 - [ ] Async compute + transfer queues
 

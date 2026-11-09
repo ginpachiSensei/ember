@@ -4,3 +4,9 @@ vcpkg_installed/
 .vs/
 *.user
 imgui.ini
+
+# Sample assets fetched by tools/fetch-sample-content.ps1
+content/models/
+content/hdri/
+# Screenshots
+screenshots/
